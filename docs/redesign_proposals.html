@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JellyfishBot Settings 重设计方案展示</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --primary: #E89FD9;
+            --secondary: #8B7FD9;
+            --accent: #5FC9E6;
+            --bg-base: #0f0f13;
+            --bg-container: #16161d;
+            --bg-elevated: #1c1c27;
+            --text-primary: #e4e4ed;
+            --text-secondary: #9494a8;
+            --border: #2a2a3a;
+            --success: #4ade80;
+            --warning: #FFB86C;
+            --error: #FF6B9D;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background-color: var(--bg-base);
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 60px;
+        }
+
+        h1 {
+            color: var(--primary);
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+        }
+
+        .section-title {
+            border-left: 4px solid var(--primary);
+            padding-left: 15px;
+            margin: 40px 0 20px;
+            font-size: 1.5rem;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 30px;
+            margin-bottom: 60px;
+        }
+
+        .card {
+            background: var(--bg-container);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            transition: transform 0.3s ease, border-color 0.3s ease;
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+            border-color: var(--primary);
+            background: var(--bg-elevated);
+        }
+
+        .card h3 {
+            margin-top: 0;
+            color: var(--primary);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .card p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+
+        .tag {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            background: var(--border);
+            color: var(--text-secondary);
+            margin-right: 5px;
+        }
+
+        .tag-primary { background: rgba(232, 159, 217, 0.15); color: var(--primary); }
+        .tag-accent { background: rgba(95, 201, 230, 0.15); color: var(--accent); }
+
+        /* Comparison Table */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            background: var(--bg-container);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        th, td {
+            padding: 15px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            background: var(--bg-elevated);
+            color: var(--primary);
+            font-weight: 600;
+        }
+
+        /* Mockup Preview */
+        .mockup-container {
+            margin-top: 40px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            background: #000;
+            text-align: center;
+        }
+
+        .mockup-container img {
+            max-width: 100%;
+            border-radius: 4px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+
+        .badge {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.7rem;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        .badge-new { background: var(--accent); color: var(--bg-base); }
+        .badge-pro { background: var(--secondary); color: var(--text-primary); }
+
+        footer {
+            text-align: center;
+            margin-top: 80px;
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            padding-bottom: 40px;
+        }
+
+        .highlight-box {
+            background: rgba(232, 159, 217, 0.05);
+            border: 1px dashed var(--primary);
+            padding: 20px;
+            border-radius: 12px;
+            margin: 20px 0;
+        }
+
+        ul {
+            padding-left: 20px;
+        }
+
+        li {
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>JellyfishBot Settings Redesign</h1>
+        <p class="subtitle">三套重设计方案：从「功能驱动」转向「体验与效能驱动」</p>
+    </header>
+
+    <div class="section-title">方案一：极简效能版 (The Streamliner)</div>
+    <div class="grid">
+        <div class="card">
+            <span class="badge badge-new">Focus: Speed</span>
+            <h3><i class="fas fa-bolt"></i> 核心设计理念</h3>
+            <p>消除所有不必要的层级，将 Master-Detail 结构优化为「即时响应式」。</p>
+            <ul>
+                <li><strong>Service 页</strong>：取消 Tab 切换，采用单页滚动 + 侧边锚点导航。</li>
+                <li><strong>Scheduler 页</strong>：将运行记录从详情中分离，提供全局「任务监控面板」。</li>
+                <li><strong>交互</strong>：所有编辑均为 Inline（内联），点击文字直接修改，无需 Modal。</li>
+            </ul>
+        </div>
+        <div class="card">
+            <h3><i class="fas fa-list-check"></i> 关键改进</h3>
+            <p>针对高频操作进行路径缩短。</p>
+            <ul>
+                <li>列表卡片增加快速开关（Toggle）和一键运行按钮。</li>
+                <li>能力配置改用图标网格，支持拖拽排序。</li>
+                <li>API Key 生成流程简化为单行操作。</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="section-title">方案二：数据仪表盘版 (The Dashboarder)</div>
+    <div class="grid">
+        <div class="card">
+            <span class="badge badge-pro">Focus: Insight</span>
+            <h3><i class="fas fa-chart-line"></i> 核心设计理念</h3>
+            <p>将设置页转化为「控制中心」，强调数据反馈与状态监控。</p>
+            <ul>
+                <li><strong>Service 页</strong>：顶部增加统计卡片（活跃会话、Token 消耗、成功率）。</li>
+                <li><strong>Scheduler 页</strong>：增加「运行日历」视图，直观查看任务分布与失败热点。</li>
+                <li><strong>视觉</strong>：使用更多渐变色和发光效果（Glow Effect）标记活跃状态。</li>
+            </ul>
+        </div>
+        <div class="card">
+            <h3><i class="fas fa-eye"></i> 关键改进</h3>
+            <p>增强状态感知与异常处理。</p>
+            <ul>
+                <li>WeChat 渠道增加「实时日志流」预览。</li>
+                <li>任务运行记录支持按错误类型聚合。</li>
+                <li>详情页增加「健康度」评分。</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="section-title">方案三：模块化向导版 (The Architect)</div>
+    <div class="grid">
+        <div class="card">
+            <h3><i class="fas fa-cubes"></i> 核心设计理念</h3>
+            <p>针对复杂配置提供清晰的模块化路径，降低认知负担。</p>
+            <ul>
+                <li><strong>Service 页</strong>：采用「模块堆叠」布局，每个功能（WeChat, API, Docs）都是独立可拆卸的卡片。</li>
+                <li><strong>Scheduler 页</strong>：创建流程改为分步向导（Wizard），引导用户完成复杂的权限设置。</li>
+                <li><strong>视觉</strong>：强调容器感，使用深浅交替的背景层级区分功能块。</li>
+            </ul>
+        </div>
+        <div class="card">
+            <h3><i class="fas fa-puzzle-piece"></i> 关键改进</h3>
+            <p>提升配置的严谨性与可维护性。</p>
+            <ul>
+                <li>权限设置（Sandbox）增加可视化路径选择器。</li>
+                <li>支持「配置模板」，可快速复用 Service 设置。</li>
+                <li>Test Tab 升级为完整的「Playground」沙盒测试环境。</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="section-title">方案对比总结</div>
+    <table>
+        <thead>
+            <tr>
+                <th>维度</th>
+                <th>方案一：极简效能</th>
+                <th>方案二：数据仪表盘</th>
+                <th>方案三：模块化向导</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>适用人群</strong></td>
+                <td>资深开发者 / 极客</td>
+                <td>运营 / 管理人员</td>
+                <td>企业级用户 / 新手</td>
+            </tr>
+            <tr>
+                <td><strong>Service 详情</strong></td>
+                <td>单页锚点滚动</td>
+                <td>带统计概览的 Tabs</td>
+                <td>可折叠模块卡片</td>
+            </tr>
+            <tr>
+                <td><strong>任务运行记录</strong></td>
+                <td>侧边抽屉弹出</td>
+                <td>日历 + 聚合列表</td>
+                <td>嵌入式时间轴</td>
+            </tr>
+            <tr>
+                <td><strong>创建体验</strong></td>
+                <td>快速内联创建</td>
+                <td>标准 Modal</td>
+                <td>分步向导 (Wizard)</td>
+            </tr>
+            <tr>
+                <td><strong>视觉风格</strong></td>
+                <td>高对比度、紧凑</td>
+                <td>发光特效、数据可视化</td>
+                <td>层次分明、模块化</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="highlight-box">
+        <h3><i class="fas fa-lightbulb"></i> 专家建议：混合方案 (The Jellyfish Hybrid)</h3>
+        <p>基于 JellyfishBot 的实际使用场景，我们建议采用以下混合策略：</p>
+        <ul>
+            <li><strong>布局</strong>：采用方案三的「模块化卡片」，但保留方案一的「侧边锚点」以便快速跳转。</li>
+            <li><strong>统计</strong>：在 Header 引入方案二的「关键指标小卡片」，让状态一目了然。</li>
+            <li><strong>创建</strong>：使用方案三的「分步向导」，但在熟练后提供「快速创建」入口。</li>
+            <li><strong>测试</strong>：强烈建议将 Test Tab 升级为 Playground，直接在设置页进行对话调试。</li>
+        </ul>
+    </div>
+
+    <div class="section-title">视觉风格预览 (Mockup Preview)</div>
+    <div class="mockup-container">
+        <p style="color: var(--text-secondary); margin-bottom: 20px;">JellyfishBot 品牌视觉语言 (基于方案二/三混合)</p>
+        <img src="jellyfish-ui-mockup.png" alt="JellyfishBot UI Mockup">
+    </div>
+
+    <footer>
+        <p>JellyfishBot Design Team &copy; 2026 | Powered by Gemini-3-Flash</p>
+    </footer>
+</div>
+
+</body>
+</html>

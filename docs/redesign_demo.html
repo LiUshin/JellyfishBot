@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JellyfishBot UI Redesign Demo</title>
+  <!-- 引入 Phosphor Icons -->
+  <script src="https://unpkg.com/@phosphor-icons/web"></script>
+  <style>
+    :root {
+      --primary: #E89FD9;
+      --secondary: #8B7FD9;
+      --accent: #5FC9E6;
+      --success: #4ade80;
+      --warning: #FFB86C;
+      --error: #FF6B9D;
+      
+      --bg-base: #0f0f13;
+      --bg-container: #16161d;
+      --bg-elevated: #1c1c27;
+      --bg-hover: #22222f;
+      --bg-active: #2a2a3a;
+      
+      --text-primary: #e4e4ed;
+      --text-secondary: #9494a8;
+      --text-muted: #66668a;
+      
+      --border: #2a2a3a;
+      --border-strong: #33334a;
+      
+      --radius-sm: 4px;
+      --radius-md: 8px;
+      --radius-lg: 12px;
+      
+      --shadow-float: 0 4px 12px rgba(0,0,0,0.4);
+      --shadow-glow: 0 0 15px rgba(232, 159, 217, 0.15);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background-color: var(--bg-base);
+      color: var(--text-primary);
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+    }
+
+    /* 滚动条美化 */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+    /* ─── 布局 ─── */
+    .sidebar {
+      width: 240px;
+      background-color: var(--bg-container);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .brand {
+      height: 60px;
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      font-weight: 600;
+      font-size: 16px;
+      color: var(--primary);
+      border-bottom: 1px solid var(--border);
+      gap: 10px;
+    }
+
+    .nav-menu {
+      padding: 10px 0;
+      flex: 1;
+    }
+
+    .nav-item {
+      padding: 10px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.2s;
+      font-size: 14px;
+    }
+
+    .nav-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+    .nav-item.active { 
+      background: rgba(232, 159, 217, 0.1); 
+      color: var(--primary);
+      border-right: 3px solid var(--primary);
+    }
+
+    .main-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .topbar {
+      height: 60px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      background: var(--bg-container);
+      gap: 20px;
+    }
+
+    .view-toggle {
+      display: flex;
+      background: var(--bg-base);
+      border-radius: var(--radius-md);
+      padding: 4px;
+      border: 1px solid var(--border);
+    }
+
+    .view-toggle button {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      padding: 6px 16px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.2s;
+    }
+
+    .view-toggle button.active {
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+      box-shadow: var(--shadow-float);
+    }
+
+    /* ─── 30/70 Split View ─── */
+    .split-view {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    .list-panel {
+      width: 320px;
+      background: var(--bg-container);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .list-header {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .search-box {
+      background: var(--bg-base);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .search-box input {
+      background: transparent;
+      border: none;
+      color: var(--text-primary);
+      outline: none;
+      width: 100%;
+      font-size: 13px;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: var(--bg-base);
+      border: none;
+      padding: 8px 16px;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      transition: opacity 0.2s;
+    }
+    .btn-primary:hover { opacity: 0.9; }
+
+    .btn-outline {
+      background: transparent;
+      color: var(--text-primary);
+      border: 1px solid var(--border-strong);
+      padding: 6px 12px;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+    .btn-outline:hover { background: var(--bg-hover); border-color: var(--text-muted); }
+
+    .list-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+    }
+
+    .list-card {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 12px;
+      margin-bottom: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .list-card:hover {
+      border-color: var(--border-strong);
+      background: var(--bg-hover);
+    }
+
+    .list-card.active {
+      border-color: var(--primary);
+      background: rgba(232, 159, 217, 0.05);
+      border-left: 3px solid var(--primary);
+    }
+
+    .card-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .card-desc {
+      font-size: 12px;
+      color: var(--text-secondary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 8px;
+    }
+
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+    }
+    .status-dot.success { background: var(--success); box-shadow: 0 0 6px rgba(74, 222, 128, 0.4); }
+    .status-dot.draft { background: var(--text-muted); }
+
+    .tag {
+      background: var(--bg-base);
+      border: 1px solid var(--border);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    /* ─── Detail Panel ─── */
+    .detail-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-base);
+      overflow-y: auto;
+    }
+
+    .detail-header {
+      padding: 24px 32px;
+      background: var(--bg-container);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+
+    .detail-title {
+      font-size: 20px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    /* Stats Dashboard Row */
+    .stats-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      padding: 24px 32px 0;
+    }
+
+    .stat-card {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 16px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .stat-icon {
+      width: 40px; height: 40px;
+      border-radius: 10px;
+      background: rgba(95, 201, 230, 0.1);
+      color: var(--accent);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px;
+    }
+
+    .stat-info .label { font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
+    .stat-info .value { font-size: 20px; font-weight: 600; color: var(--text-primary); }
+
+    /* Modules */
+    .modules-container {
+      padding: 24px 32px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .module-card {
+      background: var(--bg-container);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+    }
+
+    .module-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      font-weight: 600;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .module-body {
+      padding: 20px;
+    }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: 100px 1fr;
+      gap: 12px 16px;
+      font-size: 13px;
+    }
+
+    .info-label { color: var(--text-secondary); }
+    .info-value { color: var(--text-primary); }
+    .code-span { 
+      font-family: monospace; 
+      background: var(--bg-base); 
+      padding: 2px 6px; 
+      border-radius: 4px; 
+      border: 1px solid var(--border);
+      color: var(--primary);
+    }
+
+    /* Capabilities Grid */
+    .cap-grid {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .cap-item {
+      background: var(--bg-base);
+      border: 1px solid var(--border);
+      padding: 10px 16px;
+      border-radius: var(--radius-md);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--text-primary);
+    }
+    .cap-item i { color: var(--accent); }
+
+    /* Timeline for Scheduler */
+    .timeline {
+      position: relative;
+      padding-left: 20px;
+    }
+    .timeline::before {
+      content: '';
+      position: absolute;
+      left: 7px; top: 0; bottom: 0;
+      width: 2px;
+      background: var(--border);
+    }
+    .tl-item {
+      position: relative;
+      margin-bottom: 20px;
+    }
+    .tl-dot {
+      position: absolute;
+      left: -20px;
+      width: 16px; height: 16px;
+      border-radius: 50%;
+      background: var(--bg-elevated);
+      border: 2px solid var(--success);
+      display: flex; align-items: center; justify-content: center;
+      transform: translateX(-50%);
+    }
+    .tl-dot.error { border-color: var(--error); }
+    .tl-content {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 12px;
+    }
+    .tl-header {
+      display: flex; justify-content: space-between; margin-bottom: 8px;
+      font-size: 13px;
+    }
+
+    /* Utility */
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+  <!-- Sidebar -->
+  <nav class="sidebar">
+    <div class="brand">
+      <i class="ph-fill ph-jellyfish" style="font-size: 24px;"></i>
+      JellyfishBot
+    </div>
+    <div class="nav-menu">
+      <div class="nav-item"><i class="ph ph-note-pencil"></i> Prompt</div>
+      <div class="nav-item"><i class="ph ph-users-three"></i> Subagent 管理</div>
+      <div class="nav-item active"><i class="ph ph-stack"></i> Service 管理</div>
+      <div class="nav-item"><i class="ph ph-timer"></i> 定时任务</div>
+      <div class="nav-item"><i class="ph ph-chat-teardrop-dots"></i> 微信接入</div>
+    </div>
+  </nav>
+
+  <!-- Main Content -->
+  <main class="main-content">
+    <div class="topbar">
+      <div class="view-toggle">
+        <button class="active" onclick="switchView('service')">Service 视图 (Dashboard版)</button>
+        <button onclick="switchView('scheduler')">Scheduler 视图 (Timeline版)</button>
+      </div>
+      <div style="flex: 1;"></div>
+      <div style="color: var(--text-secondary); font-size: 13px;">
+        <i class="ph ph-info"></i> 这是一个纯前端 UI Demo，展示重设计方案
+      </div>
+    </div>
+
+    <!-- ================= SERVICE VIEW ================= -->
+    <div class="split-view" id="view-service">
+      <!-- Left List -->
+      <div class="list-panel">
+        <div class="list-header">
+          <div class="search-box">
+            <i class="ph ph-magnifying-glass"></i>
+            <input type="text" placeholder="搜索 Service...">
+          </div>
+          <button class="btn-primary"><i class="ph ph-plus"></i> 创建 Service</button>
+        </div>
+        <div class="list-content">
+          <div class="list-card active">
+            <div class="card-title">
+              <span>智能客服助手</span>
+              <span class="status-dot success"></span>
+            </div>
+            <div class="card-desc">处理日常售后咨询与退换货</div>
+            <div style="display: flex; gap: 6px; margin-top: 8px;">
+              <span class="tag">claude-3-5-sonnet</span>
+              <span class="tag"><i class="ph ph-wechat-logo"></i> 已接入</span>
+            </div>
+          </div>
+          <div class="list-card">
+            <div class="card-title">
+              <span>数据分析 Agent</span>
+              <span class="status-dot success"></span>
+            </div>
+            <div class="card-desc">连接数据库执行 SQL 分析</div>
+            <div style="display: flex; gap: 6px; margin-top: 8px;">
+              <span class="tag">gpt-4o</span>
+            </div>
+          </div>
+          <div class="list-card">
+            <div class="card-title">
+              <span>内部知识库问答</span>
+              <span class="status-dot draft"></span>
+            </div>
+            <div class="card-desc">基于公司规章制度的 RAG 问答</div>
+            <div style="display: flex; gap: 6px; margin-top: 8px;">
+              <span class="tag">草稿</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Detail -->
+      <div class="detail-panel">
+        <div class="detail-header">
+          <div>
+            <div class="detail-title">
+              智能客服助手
+              <span class="tag" style="color: var(--success); border-color: var(--success); background: rgba(74,222,128,0.1)">已发布</span>
+            </div>
+            <div style="color: var(--text-secondary); font-size: 13px;">ID: <span class="code-span">svc_8f92a1b3</span></div>
+          </div>
+          <div style="display: flex; gap: 10px;">
+            <button class="btn-outline"><i class="ph ph-pencil-simple"></i> 编辑</button>
+            <button class="btn-outline" style="color: var(--error); border-color: var(--error);"><i class="ph ph-trash"></i> 删除</button>
+          </div>
+        </div>
+
+        <!-- Dashboard Stats -->
+        <div class="stats-row">
+          <div class="stat-card">
+            <div class="stat-icon"><i class="ph ph-chat-circle-dots"></i></div>
+            <div class="stat-info">
+              <div class="label">活跃微信会话</div>
+              <div class="value">128</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon" style="color: var(--primary); background: rgba(232,159,217,0.1)"><i class="ph ph-lightning"></i></div>
+            <div class="stat-info">
+              <div class="label">今日 API 调用</div>
+              <div class="value">3,402</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon" style="color: var(--success); background: rgba(74,222,128,0.1)"><i class="ph ph-check-circle"></i></div>
+            <div class="stat-info">
+              <div class="label">任务成功率</div>
+              <div class="value">99.8%</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Modular Cards -->
+        <div class="modules-container">
+          <!-- Module 1: Basic -->
+          <div class="module-card">
+            <div class="module-header">
+              <span><i class="ph ph-info"></i> 基本配置</span>
+            </div>
+            <div class="module-body info-grid">
+              <div class="info-label">模型</div>
+              <div class="info-value">anthropic:claude-3-5-sonnet-20241022</div>
+              <div class="info-label">允许文档</div>
+              <div class="info-value"><span class="code-span">docs/support/*</span></div>
+              <div class="info-label">允许脚本</div>
+              <div class="info-value"><span class="code-span">scripts/query_order.py</span></div>
+            </div>
+          </div>
+
+          <!-- Module 2: Capabilities -->
+          <div class="module-card">
+            <div class="module-header">
+              <span><i class="ph ph-magic-wand"></i> 挂载能力</span>
+            </div>
+            <div class="module-body cap-grid">
+              <div class="cap-item"><i class="ph ph-globe"></i> 联网搜索</div>
+              <div class="cap-item"><i class="ph ph-clock"></i> 定时任务</div>
+              <div class="cap-item" style="opacity: 0.5; border-style: dashed;"><i class="ph ph-image"></i> 图片生成 (未启用)</div>
+            </div>
+          </div>
+
+          <!-- Module 3: WeChat -->
+          <div class="module-card" style="border-color: #07c160;">
+            <div class="module-header" style="background: rgba(7, 193, 96, 0.05);">
+              <span style="color: #07c160; display: flex; align-items: center; gap: 8px;">
+                <i class="ph-fill ph-wechat-logo" style="font-size: 18px;"></i> 微信渠道 (运行中)
+              </span>
+              <button class="btn-outline" style="padding: 4px 8px; font-size: 12px;">配置</button>
+            </div>
+            <div class="module-body" style="display: flex; gap: 20px;">
+              <div style="width: 100px; height: 100px; background: #fff; padding: 5px; border-radius: 8px;">
+                <!-- Fake QR Code -->
+                <div style="width: 100%; height: 100%; background: repeating-linear-gradient(45deg, #000, #000 10px, #fff 10px, #fff 20px);"></div>
+              </div>
+              <div style="flex: 1;">
+                <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">
+                  用户扫码即可分配独立对话。当前最大会话数限制：500。
+                </div>
+                <div style="display: flex; gap: 10px;">
+                  <button class="btn-outline"><i class="ph ph-copy"></i> 复制入口链接</button>
+                  <button class="btn-outline"><i class="ph ph-list"></i> 查看活跃会话 (128)</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= SCHEDULER VIEW ================= -->
+    <div class="split-view hidden" id="view-scheduler">
+      <!-- Left List -->
+      <div class="list-panel">
+        <div class="list-header" style="padding-bottom: 0;">
+          <div style="display: flex; gap: 20px; border-bottom: 1px solid var(--border); margin-bottom: 16px;">
+            <div style="padding-bottom: 8px; color: var(--primary); border-bottom: 2px solid var(--primary); font-weight: 600; cursor: pointer; font-size: 14px;">管理员任务</div>
+            <div style="padding-bottom: 8px; color: var(--text-secondary); cursor: pointer; font-size: 14px;">服务任务</div>
+          </div>
+          <div class="search-box">
+            <i class="ph ph-magnifying-glass"></i>
+            <input type="text" placeholder="搜索任务...">
+          </div>
+          <button class="btn-primary" style="margin-bottom: 16px;"><i class="ph ph-plus"></i> 创建定时任务</button>
+        </div>
+        <div class="list-content">
+          <div class="list-card active">
+            <div class="card-title">
+              <span>每日早报生成</span>
+              <span class="status-dot success"></span>
+            </div>
+            <div class="card-desc">0 8 * * * (每天早8点)</div>
+            <div style="display: flex; gap: 6px; margin-top: 8px;">
+              <span class="tag" style="color: var(--secondary)">🤖 Agent</span>
+              <span class="tag">已运行 42 次</span>
+            </div>
+          </div>
+          <div class="list-card">
+            <div class="card-title">
+              <span>清理临时文件</span>
+              <span class="status-dot success"></span>
+            </div>
+            <div class="card-desc">间隔 86400 秒</div>
+            <div style="display: flex; gap: 6px; margin-top: 8px;">
+              <span class="tag" style="color: var(--accent)">🔧 Script</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Detail -->
+      <div class="detail-panel">
+        <div class="detail-header">
+          <div>
+            <div class="detail-title">每日早报生成</div>
+            <div style="color: var(--text-secondary); font-size: 13px;">
+              <i class="ph ph-clock-counter-clockwise"></i> 下次运行: 2026-04-07 08:00:00
+            </div>
+          </div>
+          <div style="display: flex; gap: 10px;">
+            <button class="btn-primary" style="background: var(--success); color: #000;"><i class="ph ph-play-circle"></i> 立即执行</button>
+            <button class="btn-outline"><i class="ph ph-pencil-simple"></i></button>
+          </div>
+        </div>
+
+        <div class="modules-container">
+          <!-- Config -->
+          <div class="module-card">
+            <div class="module-body info-grid">
+              <div class="info-label">任务类型</div>
+              <div class="info-value"><span class="tag" style="color: var(--secondary)">🤖 Agent</span></div>
+              <div class="info-label">执行指令</div>
+              <div class="info-value">搜索过去24小时内 AI 领域的重大新闻，生成一份 Markdown 格式的早报，并保存到 docs/daily_report.md 中。</div>
+              <div class="info-label">沙箱权限</div>
+              <div class="info-value">
+                <span class="code-span">读: *</span> 
+                <span class="code-span" style="margin-left: 8px;">写: docs/</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Run History Timeline -->
+          <div class="module-card">
+            <div class="module-header">
+              <span><i class="ph ph-list-dashes"></i> 最近运行记录</span>
+              <button class="btn-outline" style="padding: 2px 8px; font-size: 12px;"><i class="ph ph-arrows-clockwise"></i> 刷新</button>
+            </div>
+            <div class="module-body">
+              <div class="timeline">
+                
+                <!-- Run 1 -->
+                <div class="tl-item">
+                  <div class="tl-dot"><i class="ph-fill ph-check-circle" style="color: var(--success); font-size: 18px; background: var(--bg-base); border-radius: 50%;"></i></div>
+                  <div class="tl-content">
+                    <div class="tl-header">
+                      <span style="color: var(--success); font-weight: 600;">成功 (45s)</span>
+                      <span style="color: var(--text-muted);">今天 08:00:00</span>
+                    </div>
+                    <div style="font-size: 12px; color: var(--text-secondary); background: var(--bg-base); padding: 8px; border-radius: 4px; border: 1px solid var(--border);">
+                      <div style="margin-bottom: 4px;"><i class="ph ph-magnifying-glass" style="color: var(--warning)"></i> 调用工具: web_search ("AI news last 24 hours")</div>
+                      <div style="margin-bottom: 4px;"><i class="ph ph-file-text" style="color: var(--accent)"></i> 写入文件: docs/daily_report.md</div>
+                      <div><i class="ph ph-check" style="color: var(--success)"></i> Agent 正常退出</div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Run 2 -->
+                <div class="tl-item">
+                  <div class="tl-dot error"><i class="ph-fill ph-x-circle" style="color: var(--error); font-size: 18px; background: var(--bg-base); border-radius: 50%;"></i></div>
+                  <div class="tl-content" style="border-color: rgba(255, 107, 157, 0.3);">
+                    <div class="tl-header">
+                      <span style="color: var(--error); font-weight: 600;">失败 (12s)</span>
+                      <span style="color: var(--text-muted);">昨天 08:00:00</span>
+                    </div>
+                    <div style="font-size: 12px; color: var(--error); background: rgba(255, 107, 157, 0.1); padding: 8px; border-radius: 4px; border: 1px solid rgba(255, 107, 157, 0.2); font-family: monospace;">
+                      Error: web_search tool failed. API rate limit exceeded.
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    function switchView(view) {
+      // Update buttons
+      document.querySelectorAll('.view-toggle button').forEach(btn => btn.classList.remove('active'));
+      event.target.classList.add('active');
+
+      // Update views
+      document.getElementById('view-service').classList.add('hidden');
+      document.getElementById('view-scheduler').classList.add('hidden');
+      
+      document.getElementById('view-' + view).classList.remove('hidden');
+
+      // Update sidebar active state for realism
+      const navItems = document.querySelectorAll('.nav-item');
+      navItems.forEach(item => item.classList.remove('active'));
+      if (view === 'service') navItems[2].classList.add('active');
+      if (view === 'scheduler') navItems[3].classList.add('active');
+    }
+  </script>
+</body>
+</html>
