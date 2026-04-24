@@ -1399,3 +1399,67 @@ users/{admin}/inbox/
 - **「回到底部」按钮可见性必须用 React state 不是 ref**：MessageList 内部 `atBottomRef` 用于 follow-tail 判断（避免每次跨阈值都 re-render Virtuoso），但按钮 className 必须由 ChatPage 的 `isAtBottom` state 驱动，否则 className 不会随用户滚动重算。MessageList 通过 `onAtBottomChange?: (atBottom: boolean) => void` prop 把状态抛上去，ChatPage `setIsAtBottom`。两者并存：ref 给内部用，state 给 UI 用。
 - **「回到底部」按钮显示规则放宽**：旧版只在 `isViewingStream && isStreaming && !isAtBottom` 才显示，长会话非流式状态上滑后没法一键到底，UX 偏弱。改为 `!isAtBottom && messages.length > 0` 即显示。
 - **`selectedModel` 本地记忆**：`frontend/src/utils/lastSelectedModel.ts` 提供 `getLastSelectedModel/setLastSelectedModel`，localStorage key `last_selected_llm`。`Chat/index.tsx::loadModels` 优先恢复本地值（前提：仍出现在 `/api/models` 返回的 available 列表里，否则回退到 `data.default`）；下拉框 onChange 包了一层 `handleSelectModel` 同步写 localStorage。**只是本地记忆不动后端**——设置页里的 capability_defaults 才是真·全局默认，跨设备/跨浏览器仍走那个；当时刻意没做 B 方案（PUT defaults）以免覆盖用户在设置页的偏好。
+
+## Service「使用情况」面板（2026-04-23）
+
+> 痛点：admin 看不到自己 published service 在被怎么用 —— 既没有 consumer 对话历史的 UI（数据其实在 `services/{svc}/conversations/`，但只有 memory_tools 能读），也没有「这个 key 调了多少次 / 谁失败了」的视图。
+
+### 后端
+
+**`app/services/usage_log.py`（新）** — 轻量请求级 access log：
+- 按 service 分目录、按月轮转：`users/{admin_id}/services/{svc_id}/usage/usage-YYYY-MM.jsonl`
+- `record_request(admin_id, svc_id, *, channel, key_id, conv_id, endpoint, status_code, latency_ms, ok)` 一行 JSONL，fire-and-forget（异常一律吞，绝不阻塞用户请求）。
+- `list_records(..., limit, channel, max_months=6)` 按月份倒序合并 tail 读，只把命中的 channel 算入 limit。
+- 字段是「最小集」——后续要 token / IP / model_used 时直接加字段，老记录靠 `rec.get(...)` 向后兼容。
+- **不主动归档/清理**。典型 service 量小，单文件一年也就几 MB；爆了再说。
+
+**`app/services/published.py`** —
+- `create_consumer_conversation(..., source: str = "")` 多了 source 参数（"web" / "api" / "wechat"），写进 `meta.json`；老会话迁移过来 source 是空，UI 显示「未知」。
+- 新增 `list_consumer_conversations(admin_id, svc_id)` —— 只读每个 conv 的 `meta.json`，不读 `messages.jsonl`，O(1) per conv。
+- 新增 `delete_consumer_conversation(admin_id, svc_id, conv_id)` —— 整目录 rmtree，附件也一起清。
+
+**接入点**：
+- `app/routes/consumer.py`：3 个端点都包了计时 + `record_request`。`/chat` source="web"，`/chat/completions` source="api"，`/conversations` source="api"。SSE 用 `_record_stream(gen, ...)` 包外层 generator，在 finally 阶段记一条（捕获完整流时长 + 异常），客户端中断（GeneratorExit）算 ok。
+- `app/channels/wechat/session_manager.py`：`create_consumer_conversation(..., source="wechat")`。
+- `app/channels/wechat/bridge.py::handle_wechat_message`：try/finally 计时，channel="wechat", endpoint="wechat:on_message"，key_id 留空（微信没 key 概念）。
+
+**新增 admin routes**（`app/routes/services.py`）：
+- `GET /api/services/{sid}/conversations` — list 摘要
+- `GET /api/services/{sid}/conversations/{cid}` — 整段对话（含 messages）
+- `DELETE /api/services/{sid}/conversations/{cid}` — 硬删
+- `GET /api/services/{sid}/usage?limit=&channel=` — 调用记录
+
+### 前端
+
+`frontend/src/services/api.ts` 加 `ServiceConvSummary / ServiceConvDetail / ServiceUsageRecord` 三个 type + 4 个 API 函数。
+
+`frontend/src/pages/AdminServices/index.tsx`：在 service 详情右侧加一个 **"使用情况" `ModuleCard`**，header 用 `Segmented` 切「会话 (N) / 调用 (M)」，刷新按钮重读对应数据。
+- 会话视图：Table 列 [来源 Tag / 标题 / 消息数 / 最近活跃 / 查看·删除]，「查看」打开 `Drawer` 用纯文本+pre-wrap 渲染消息（**没复用 admin 的 MessageBubble** —— 避免拖进 markdown / hljs / Virtuoso 一大套，admin 只是要看一眼，能看清就行）。
+- 调用视图：Table 列 [时间 / 来源 / Endpoint / Key / 会话 / 状态 / 耗时]，会话列点了直接弹 Drawer 看那条会话；上方多一个 channel 过滤 `Segmented`（全部 / 网页 / API / 微信）。
+- 进 service 时 `selectService` 自动并行加载 convs + usage。
+- 来源色：web=blue, api=purple, wechat=green。
+
+### 边界 / 注意
+
+- **「会话」的 source 在 conv 创建时就定了**，是 conv 自己的属性，不是消息的属性。同一个 conv 可以被 web / api / wechat 任意一个**首次**触发创建，之后被多个渠道复用也不会改 source。如果以后要按消息粒度区分，得在 `save_consumer_message` 里加 `source` 字段。
+- **request log 是 fire-and-forget**：`record_request` 内部 try/except 全吞 —— 哪怕 usage_log 文件被锁、磁盘满，也绝不能让 consumer API 返 500。代价是丢日志比丢请求体面。
+- **WeChat 没有 key 概念**：消息从微信扫码 session 走，没经过 sk-svc 鉴权链，`key_id=""`。前端表格 Key 列空就显示 `-`。
+- **不要给 record_request 加 await 或 IO 重试**：现在它是同步的、单 `open(path,"ab") + write` 的 syscall，POSIX 保证 < PIPE_BUF 写入原子，多 worker 并发也不会撕行。改成异步 / 加重试反而引入复杂度和新的丢日志路径。
+- **Drawer 里直接拼字符串**：`m.tool_calls` 用 `JSON.stringify(...).slice(0, 300)` 截断，避免特别大的 tool result 把 Drawer 撑爆。如果以后要展开看完整内容，再加个「展开」按钮。
+- **前端 `usageView` 切「调用」时不会自动重新拉 usage**：进 service 时已经一起拉了一遍，切 tab 只切视图。要刷新得点头部「刷新」按钮或者切 channel 过滤器。这个语义和 react state 流向一致；如果嫌不直观，把 `usageView` 切到 records 时触发一次 `loadSvcUsage` 即可。
+
+---
+
+## MCP / 外部工具
+
+### huozi-mcp（项目级安装，2026-04-23）
+
+- 配置文件：`.cursor/mcp.json`（**项目级**，仅本仓库 Cursor 会加载；`.cursor/` 已在 `.gitignore` 第 72 行，Key 不会被提交）。
+- 端点：`https://cloud.huozi.app/mcp`，HTTP 传输 + `Authorization: Bearer <api_key>`。
+- workspace：`liushinan1998`（key_id `k_f76b3a174a94bf6b`）。
+- Key 是**长期凭据**，被泄露时去 https://huozi.app/workspace 吊销并用 `npx huozi-mcp --client cursor` 或 device-code 流程重新申请。
+- 自部署时把 `HUOZI_CLOUD_URL` 指向自己的实例即可，CLI 流程一致。
+
+### 一次性封面页
+
+- `cover/movable-type.html` —— 活字印刷术封面页 demo，单文件、CDN 依赖（Google Fonts + ECharts SVG 渲染）、纯 CSS 纸纹与朱砂印章、ECharts 横向时间线（毕昇→古腾堡→王选 8 个节点，上下交错避让）。如果以后要做"项目封面/PPT 首页"风格的静态页，可以直接抄这套色板与版式：米色三段渐变 `#fbf3df → #f1e3c0 → #e6d2a3`、朱砂主色 `#9b2a2a`、衬线字体 `Noto Serif SC` + `Cormorant Garamond`、四角 1px 边框 + inset 6px 同色描边的"花边"装饰。
