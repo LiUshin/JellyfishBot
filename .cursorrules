@@ -657,7 +657,8 @@ pages/Scheduler/
 pages/WeChat/
   index.tsx           — 微信接入 (QR 生成/轮询 + 状态 + 消息)
 components/
-  FilePanel.tsx       — 文件浏览面板 (树/上传/拖拽/重命名/Diff)
+  FilePanel.tsx       — 文件浏览面板 (多选/内拖拽/虚拟剪贴板/系统粘贴/批量 zip/发送到/Diff)
+  FolderPicker.tsx    — 单选文件夹选择器（懒加载，禁用源/源后代节点；用于「发送到/复制到」）
   FilePreview.tsx     — 多类型文件查看器（按 fileKind 分发渲染，详见下文「文件预览面板」）
   modals/
     SystemPromptEditor.tsx — System Prompt 版本管理 + Diff
@@ -703,6 +704,101 @@ components/
   - binary：`Empty` 占位 + 下载按钮
 - **工具栏切换**：toggle 类（md/html/csv/json）头部加 antd `Segmented`「预览/源码」；切换文件自动重置为预览
 - **下载按钮**：所有 kind 工具栏统一新增；保存按钮仅在 `isEditableKind` 显示
+
+### Markdown 标题锚点 + 右侧 TOC + 路径 clickable（聊天 / 文件预览共享）
+> 所有改动集中在 `pages/Chat/markdown.ts`、`components/FilePreview.tsx`、`styles/global.css`，因为聊天气泡和 markdown 文件预览复用同一套 `renderMarkdown`。
+
+- **标题锚点（`pages/Chat/markdown.ts` 自定义 `headingRenderer`）**
+  - 用 `marked.use({ renderer: { heading: headingRenderer } })` 替换默认 h 渲染
+  - `slugifyHeading(text)` 把标题转 URL 友好 id；**保留 CJK 字符**（不靠纯 `[a-z0-9-]` 过滤），重复标题加 `-2 / -3` 后缀
+  - **每次 `renderMarkdown` 调用前先 `_resetHeadingIds()`** —— 否则模块级 `_headingIdSeen` Set 会跨多条聊天消息累积，造成同名标题不停退化为 `heading-2/3/4...`，破坏锚点稳定性
+  - `this.parser.parseInline(tokens)`（`marked` v15 把 `this` 绑到 parser）保证标题里的 em/strong/code/link 仍正常渲染
+  - 末尾追加 `<a class="jf-heading-anchor" href="#id">#</a>`，hover 标题才显形（CSS 在 `styles/global.css`）
+  - DOMPurify 白名单默认放行 `id/class/href`，无需扩 SANITIZE_OPTS
+
+- **TOC（`components/FilePreview.tsx > MarkdownPreview`）**
+  - `extractToc(html)` 用 `DOMParser` 解析 h1-h3 → `[{id, depth, text}]`；**仅在 markdown 文件预览展示**，聊天气泡不渲染 TOC
+  - 滚动高亮：`IntersectionObserver` 监听容器内所有 `[id]^=` 标题；`rootMargin: '-20% 0px -70% 0px'` 让"接近视口顶部"的标题成为 active
+  - UI：右侧 `<aside>` 浮层，可点击 `UnorderedListOutlined` 折叠/展开；点击条目 `scrollIntoView({ behavior: 'smooth', block: 'start' })`
+  - 折叠后保留圆形按钮入口；TOC 仅在 `toc.length >= 2` 时显示（避免单标题文件无意义 TOC）
+
+- **路径 clickable（聊天里贴出来的工作区路径自动可点）**
+  - `markdown.ts > postProcessInlinePaths(html)` 用 `INLINE_PATH_RE` 把 `<code>/docs/x.md</code>` 这类**含 `/` 且带扩展名**的内联代码替换成 `<button class="jf-file-link jf-file-link-inline" data-jf-file="..."><span class="jf-file-link-icon">📄</span><span class="jf-file-link-name">...</span></button>`，与已有 `[[FILE:..]]` 块级链接（`renderFileLinkButton`）的样式族保持一致，行内显示更紧凑
+  - 触发条件刻意保守：必须含 `/`、不含空格/引号/反斜杠/冒号、扩展名 1-8 位字母数字 —— 避免误转 URL、Windows 盘符、命令行片段
+  - 点击转跳：`stores/fileWorkspaceContext.tsx` 在 `document` 上挂全局点击委托，命中 `[data-jf-file]` 即调 `revealInBrowser(path)` 打开文件面板并定位 —— 因此 chat 气泡 / FilePreview / 任何把 markdown 渲染到 DOM 的位置都自动可用
+  - DOMPurify 必须放行 `data-jf-file` 属性（`SANITIZE_OPTS.ADD_ATTR` 已含）
+
+- **CSS（`styles/global.css`）**
+  - `.jf-heading` 提供锚点定位的 `scroll-margin-top`
+  - `.jf-heading-anchor` 默认 `opacity: 0`，`.jf-heading:hover .jf-heading-anchor` / `:focus-visible` 才显形；hover 变品牌色
+  - `.jf-file-link-inline` 行内代码风格 + 主题色边框 hover 高亮，明确"可点"语义
+
+### 文件面板批量操作 / 拖拽 / 剪贴板 / Zip 下载 / 发送到（FilePanel + 后端 zip & copy）
+> 改动文件：`components/FilePanel.tsx`、`components/FolderPicker.tsx`（新增）、`services/api.ts`、`app/routes/files.py`、`app/storage/{base,local,s3}.py`、`app/schemas/requests.py`
+
+#### 后端
+- **`StorageService` 新增两个抽象方法**（`app/storage/base.py`）
+  - `copy(user_id, source, destination) -> str`：单文件用 `shutil.copy2`，目录用 `shutil.copytree`；S3 用 `_copy_or_move(... delete_source=False)` 复用 move 的递归逻辑（`list_objects_v2` 分页 + `copy_object`）
+  - `walk_files(user_id, path) -> Generator[(rel_path, bytes), None, None]`：local 用 `os.walk` 流式 yield；S3 用 paginator + `get_object` —— **不 buffer 整个目录**，配合 `BytesIO` zip 实现近常量内存
+  - **拒绝把目录复制到自身/后代下**（`_is_descendant` 检查，与 move 行为一致）
+- **`POST /api/files/copy`**（`CopyFileRequest{source, destination}`）
+  - 复用 `safe_join` + `path_security` 防遍历；和 move 一样捕获 `FileExistsError` → 409、`ValueError` → 400
+- **流式 Zip 下载**（`app/routes/files.py`）
+  - `_iter_zip_stream(user_id, paths)`：把所有 path 的 `walk_files()` 输出写入 `zipfile.ZipFile(BytesIO, 'w', ZIP_DEFLATED)`，**每写一个文件就 yield 一次 BytesIO 当前缓冲并 truncate**，实现"逐文件刷出去"的伪流式（pure-Python `zipfile` 不支持真正的 streaming writer，但够用）
+  - `GET /api/files/zip?paths=[json]`：标准 Bearer Auth，前端 fetch 拿 blob 触发下载
+  - `GET /api/files/zip-token?paths=...&token=...`：**给 `<a download>` 直接用的 token-in-query 变体**——浏览器原生 `<a>` 下载无法附带 Authorization 头，所以专门走 query token；token 仍走 `verify_token` 校验，行为等同 Bearer
+  - `_zip_filename_from_paths(paths)`：单根用根名，多根用 `selection-{N}.zip` 命名
+
+#### 前端（FilePanel 重写要点）
+- **多选状态机**（Finder 风格）
+  - `selected: Set<string>`、`lastSelected: string | null`
+  - 单击：清空只选当前；`Ctrl/Cmd+click`：toggle 单项；`Shift+click`：基于 `displayedFiles` 顺序的连续区间选择
+  - `Ctrl+A` 全选当前目录、`Esc` 清空选择
+  - 顶部条件渲染**批量工具栏**（仅 `selected.size > 0` 出现）：复制/剪切/发送到/打包下载/删除
+
+- **虚拟剪贴板（与系统剪贴板互不冲突）**
+  - `clipboard: { paths: string[]; mode: 'copy' | 'cut'; sourceDir: string } | null`
+  - `Ctrl+C` / `Ctrl+X` 仅在 `selected.size > 0` 且**焦点不在输入框**时触发（用 `e.target.tagName` 排除）
+  - `Ctrl+V` → `pasteHere()`：cut 模式用 `moveFile` + 清空 clipboard；copy 模式用 `copyFile` + 保留 clipboard 支持多次粘贴
+  - 顶部还有"剪贴板提示条"：显示来源目录 + 项数 + 模式，提供 `粘贴到这里` / `清空` 按钮，让虚拟剪贴板的状态可视化
+
+- **面板内拖拽（移动）**
+  - 自定义 MIME `application/x-jf-file-paths`（JSON 字符串）—— 用于和系统拖入文件区分；外部拖入文件继续走 `dataTransfer.files` → 上传逻辑
+  - `draggable` 仅在非重命名状态启用；拖动多选项目时一并带上整个 selection
+  - drop 目标：**目录行 + 面包屑某段 + 「返回上一级」按钮**，拖拽悬停加 `.jf-drop-hover` 视觉反馈
+  - 落在自身/源目录直接 no-op；冲突走 `performBulkMoveOrCopy` 的同名询问（`overwrite | rename | skip | abort`）
+
+- **系统剪贴板粘贴**
+  - 给面板根 div 绑 `onPaste`：从 `e.clipboardData.items` 读图片 → 自动命名 `clip-YYYYMMDD-HHMMSS.png` 上传到当前目录；普通文件走标准 `uploadFiles`
+
+- **「发送到 / 复制到」（右键菜单 + 工具栏）**
+  - 弹出 `FolderPicker`（新组件，`components/FolderPicker.tsx`）：antd `Tree`、`loadData` 懒加载、过滤掉非 directory；`disabledPaths` 把源目录 + 后代标灰防止自坑
+  - 选中后调 `performBulkMoveOrCopy(targetDir, mode)`，统一走冲突解决逻辑
+
+- **批量 Zip 下载**
+  - 单文件直接 `mediaUrl(path)`；多个或包含目录走 `zipDownloadUrl(paths)`（`api.ts` 的工具函数，拼接 `/files/zip-token?paths=...&token=...`），用动态 `<a download>` 触发
+  - 不需要前端 buffer，整个流程 backend StreamingResponse 推过去
+
+- **右键菜单（`buildContextMenu`）**
+  - 单项：打开 / 重命名 / 下载 / 复制 / 剪切 / 发送到 / 复制到 / 删除
+  - 多选：复制 / 剪切 / 发送到 / 复制到 / 打包下载 / 批量删除
+  - 在文件夹空白处：粘贴（含数量提示）/ 上传 / 新建文件 / 新建文件夹
+
+- **冲突解决（`performBulkMoveOrCopy`）**
+  - 遍历 selection 调 move/copy；命中 409 时弹 antd `Modal.confirm` 让用户选 `覆盖 / 重命名（追加 (1)/(2)）/ 跳过 / 全部中止`
+  - "记住本次"开关把决策应用到剩余冲突，避免连点
+
+- **API 客户端（`services/api.ts`）**
+  - `copyFile(source, destination)` → `POST /files/copy`
+  - `zipDownloadUrl(paths)` → 拼 `zip-token` 完整 URL（含 token），交给 `<a>` 用
+  - 走原 `getToken()`，复用现有鉴权
+
+#### 关键边界 / 已知约束
+- 拖拽**仅识别 effectAllowed=move**；不支持跨用户/跨 service 拖拽（路径 prefix 受 `path_security` 限制）
+- Zip 流式实质是"逐文件 chunk"，不是 zip64 真流式；超大目录（如几 GB）建议分批选；S3 模式 `walk_files` 已用 paginator，不会一次性 list 完
+- 虚拟剪贴板**仅在 SPA 内**有效，关掉浏览器即失效；和系统剪贴板隔离避免混淆
+- 复制/移动时 `source == destination` 或 src 是 dst 祖先，后端会抛 `ValueError` → 400 文案明确返回
+- "发送到"目标为根 `/` 时也支持（拼接为 `/{name}`）
 
 ### 媒体文件嵌入（<<FILE:path>> 标签）
 - **后端**: `tools.py` 的 `generate_image`/`generate_speech`/`generate_video` 返回 `<<FILE:/generated/images/xxx.png>>` 格式
@@ -1378,7 +1474,7 @@ users/{admin}/inbox/
 - 新增 `frontend/src/pages/Chat/components/MessageList.tsx`，封装 Virtuoso + smart-scroll 的所有逻辑。
 - 关键设计：
   - **`customScrollParent={scrollParentEl}`**：复用外层 `.messagesContainer` 的 overflow + padding，CSS 一字未改，"回到底部"浮层按钮的 `position: absolute` 上下文也保留。
-  - **`footerSlot` 走 Virtuoso `context`**：`StreamingMessage` / `PlanTracker` / `ApprovalCard` 这些「永远在末尾」的非历史节点放进 `Components.Footer`，跟着列表自然滚动。
+  - **「实时尾部」节点不要塞进 Virtuoso `Components.Footer`**：`StreamingMessage` / `PlanTracker` / `ApprovalCard` 直接作为 `MessageList` 的兄弟节点挂在 `messagesContainer` 下。详见下方「Virtuoso Footer 高频流式陷阱」。
   - **`followOutput="auto"`**：等价于旧 `useSmartScroll` 的「停在底部时跟随，上滑后停下」行为。
   - **`atBottomStateChange` → `atBottomRef`**：用 ref 不用 state，避免 follow tail 时频繁 re-render。
   - **`computeItemKey`**：`${timestamp}-${role}` 做指纹，新增消息时 Virtuoso 能复用旧 DOM 节点。
@@ -1389,7 +1485,18 @@ users/{admin}/inbox/
 ### 边界 / 注意
 
 - **service-chat 没动**：`ServiceChatApp.tsx` 用的是 `StreamingMessage` 而非 `MessageBubble`，且消息流较短，本轮先不动；如果将来 consumer 端也出现长会话卡顿，按相同方法虚拟化即可（`renderMarkdown` 缓存已经全局生效）。
-- **`streamBlocks` 仍走 React Context**：流式过程中 `ChatPage` 会被 `streamContext` 拉着重渲染，但 `MessageBubble` 已 memo + `MessageList` 只渲染可视区，所以重渲染只波及到 Footer 节点（即正在流式的 `StreamingMessage`），符合预期。
+- **`streamBlocks` 仍走 React Context**：流式过程中 `ChatPage` 会被 `streamContext` 拉着重渲染，但 `MessageBubble` 已 memo + `MessageList` 只渲染可视区，所以重渲染只波及到末尾「实时尾部」节点（即正在流式的 `StreamingMessage`，挂在 `MessageList` 兄弟位置），符合预期。
+
+### ⚠️ Virtuoso Footer 高频流式陷阱（2026-04-24 修复）
+
+- **症状**：`write_file` / `edit_file` 流式中，IDE 风格代码卡片出来了，但内容区域一直显示「等待内容…」+ 旋转图标，直到 LLM 写完才一次性把全部代码渲染出来；历史回看正常。中间档的 `tool_call_chunk`（每秒几十次 `args_delta`）丢了。
+- **根因**：早期版本把 `StreamingMessage` / `PlanTracker` / `ApprovalCard` 通过 `react-virtuoso` 的 `components.Footer` + `context` 注入。Virtuoso v4 的 Footer 是 `E.memo` 包的，内部 `useEmitterValue("context")` 走 `useSyncExternalStore` 订阅。`scheduleFlush` 每帧 `setStreamBlocks([...])` → `ChatPage` re-render → 新 `context` 对象 publish 到 emitter → 在 React 18 自动批处理 + Virtuoso emitter 内部去重的双重作用下，**高频中间帧大概率被合并/吞掉**，只有「最后一次稳定状态」（流结束、`block.done = true` 那次）才一定重渲染 Footer。其他低频卡片（`ToolIndicator` / `ScheduledTaskCard`）感觉不到，但每秒几十次的 `args_delta` 打字机直接报废。
+- **修复**：把 `StreamingMessage` / `PlanTracker` / `ApprovalCard` 从 `MessageList::footerSlot` / Virtuoso Footer 中拿出来，作为 `MessageList` 的兄弟节点直接挂到 `messagesContainer` 下：
+  - `frontend/src/pages/Chat/index.tsx` 553 行起改成 `<>{messages.length > 0 && <MessageList .../>} {showStreamBlocks && <StreamingMessage .../>} ...</>`。
+  - `frontend/src/pages/Chat/components/MessageList.tsx`：删除 `footerSlot` prop、`FooterContext` interface、`Footer` memo 组件、`components` 对象、`context` useMemo、`<Virtuoso context=... components=...>`，把 `memo` / `useMemo` import 也删掉。
+  - 滚动语义零变化：Virtuoso 用 `customScrollParent={scrollParentEl}`，`messagesContainer` 是真·滚动容器，`scrollTop = scrollHeight` 自然包含兄弟节点高度，`scrollFooterIntoView` 行为完全不变。
+  - 新增 `messages.length === 0 && showStreamBlocks` 的场景兜底（首条消息流式中，messages 还是空数组）：`scrollToBottom` / `resetScroll` 在 `messageListRef.current` 为 null 时回退到 `scrollParentEl.scrollTop = scrollParentEl.scrollHeight`。
+- **教训**：**任何高频（> 30Hz）更新的 React 子树都不要走 Virtuoso 的 `components.Footer/Header/EmptyPlaceholder` 走 `context` 注入**。Virtuoso 的内部 emitter / React 18 的 batching 不保证每个 publish 都被 commit，只保证最终一致。需要每帧都更新的实时 UI 应该走「直接 React state → 直接子树重渲染」的最短路径。Virtuoso 的 components 适合放「不怎么变」的辅助节点（如 loading spinner、版权说明、分页按钮）。
 - **conversation 切换时滚到底部**：`loadMessages` 末尾的 `requestAnimationFrame(() => resetScroll())` 会在 setMessages 之后调用 Virtuoso 的 `scrollToIndex({ index: 'LAST' })`。Virtuoso 对未测量的 index 会先估算后落位，UX 与旧实现一致。
 - **不要再回头给 `MessageBubble` 加 props**：所有新增 props 必须保证从 `messages` / 稳定引用来源传入，否则会破掉 `React.memo` 的浅比较。如果必须传函数，记得用 `useCallback`。
 - **「滚到底部」必须两步走**：
@@ -1399,3 +1506,248 @@ users/{admin}/inbox/
 - **「回到底部」按钮可见性必须用 React state 不是 ref**：MessageList 内部 `atBottomRef` 用于 follow-tail 判断（避免每次跨阈值都 re-render Virtuoso），但按钮 className 必须由 ChatPage 的 `isAtBottom` state 驱动，否则 className 不会随用户滚动重算。MessageList 通过 `onAtBottomChange?: (atBottom: boolean) => void` prop 把状态抛上去，ChatPage `setIsAtBottom`。两者并存：ref 给内部用，state 给 UI 用。
 - **「回到底部」按钮显示规则放宽**：旧版只在 `isViewingStream && isStreaming && !isAtBottom` 才显示，长会话非流式状态上滑后没法一键到底，UX 偏弱。改为 `!isAtBottom && messages.length > 0` 即显示。
 - **`selectedModel` 本地记忆**：`frontend/src/utils/lastSelectedModel.ts` 提供 `getLastSelectedModel/setLastSelectedModel`，localStorage key `last_selected_llm`。`Chat/index.tsx::loadModels` 优先恢复本地值（前提：仍出现在 `/api/models` 返回的 available 列表里，否则回退到 `data.default`）；下拉框 onChange 包了一层 `handleSelectModel` 同步写 localStorage。**只是本地记忆不动后端**——设置页里的 capability_defaults 才是真·全局默认，跨设备/跨浏览器仍走那个；当时刻意没做 B 方案（PUT defaults）以免覆盖用户在设置页的偏好。
+
+### ⚠️ Virtuoso 不算 margin 的兄弟节点重叠陷阱（2026-04-26 修复）
+
+- **症状**：streaming 时 `StreamingMessage` 的顶边框（assistant 气泡顶部 1px border）压在用户最后一条 query 气泡的最后一行行中心，重叠约半行 + 24px 间距，整个流式消息看起来"咬"在用户消息身上。
+- **根因**：`react-virtuoso` v4 (`dist/index.mjs:303`) 用 `wo(m.children, e, "offsetHeight", r)` 测量每个 item 高度。`offsetHeight = height + padding + border`，**不含 margin**。`.messageBubble` / `.messageBubbleUser` 之前用 `margin-bottom: 24px` 做消息间距 → Virtuoso 内部记账漏算每条 24px → 它给 `customScrollParent` 模式下的 item-list 设的 `paddingBottom`（行 2451-2452）也短了对应高度 → 外层 `.messagesContainer` 的 scrollHeight 比真实视觉高度短 → 作为 MessageList **兄弟节点**渲染的 `StreamingMessage` / `PlanTracker` / `ApprovalCard` 从亏空位置开始，叠在最后一条历史消息上。
+- **修复**：`chat.module.css` 把 `.messageBubble` / `.messageBubbleUser` 的 `margin-bottom: 24px` 改成 `padding-bottom: 24px`。padding 是 `offsetHeight` 的一部分 → Virtuoso 测对真实高度 → 兄弟节点回到正确位置。两个 wrapper 都没有 bg/border，padding 视觉上与 margin 100% 等价。
+- **不要做的事**：
+  - **不要回退到 `margin-bottom`** —— 重叠 bug 立即复现。
+  - **不要在 `MessageList::itemContent` 包一层 padding 的 div + 关掉 bubble 自己的间距** —— 这种"两次重写"的方案改动面更大，且 `StreamingMessage` 当兄弟节点时还得另想办法保持间距。
+  - **不要动 `MessageBubble.tsx` / `StreamingMessage.tsx` 给 wrapper 加 inline style** —— 两边都用同一个 `.messageBubble` class，CSS 改一次两边都生效。
+- **类比预防**：今后任何虚拟化容器（不只 react-virtuoso，react-window / react-virtual 同理）+ 兄弟节点的布局，**永远不要用 margin 做 item 间距**——一律用 `padding-bottom`（或者父容器 `gap`，前提是父容器自己直接渲染 items，虚拟化场景一般不行）。
+
+## Service「使用情况」面板（2026-04-23）
+
+> 痛点：admin 看不到自己 published service 在被怎么用 —— 既没有 consumer 对话历史的 UI（数据其实在 `services/{svc}/conversations/`，但只有 memory_tools 能读），也没有「这个 key 调了多少次 / 谁失败了」的视图。
+
+### 后端
+
+**`app/services/usage_log.py`（新）** — 轻量请求级 access log：
+- 按 service 分目录、按月轮转：`users/{admin_id}/services/{svc_id}/usage/usage-YYYY-MM.jsonl`
+- `record_request(admin_id, svc_id, *, channel, key_id, conv_id, endpoint, status_code, latency_ms, ok)` 一行 JSONL，fire-and-forget（异常一律吞，绝不阻塞用户请求）。
+- `list_records(..., limit, channel, max_months=6)` 按月份倒序合并 tail 读，只把命中的 channel 算入 limit。
+- 字段是「最小集」——后续要 token / IP / model_used 时直接加字段，老记录靠 `rec.get(...)` 向后兼容。
+- **不主动归档/清理**。典型 service 量小，单文件一年也就几 MB；爆了再说。
+
+**`app/services/published.py`** —
+- `create_consumer_conversation(..., source: str = "")` 多了 source 参数（"web" / "api" / "wechat"），写进 `meta.json`；老会话迁移过来 source 是空，UI 显示「未知」。
+- 新增 `list_consumer_conversations(admin_id, svc_id)` —— 只读每个 conv 的 `meta.json`，不读 `messages.jsonl`，O(1) per conv。
+- 新增 `delete_consumer_conversation(admin_id, svc_id, conv_id)` —— 整目录 rmtree，附件也一起清。
+
+**接入点**：
+- `app/routes/consumer.py`：3 个端点都包了计时 + `record_request`。`/chat` source="web"，`/chat/completions` source="api"，`/conversations` source="api"。SSE 用 `_record_stream(gen, ...)` 包外层 generator，在 finally 阶段记一条（捕获完整流时长 + 异常），客户端中断（GeneratorExit）算 ok。
+- `app/channels/wechat/session_manager.py`：`create_consumer_conversation(..., source="wechat")`。
+- `app/channels/wechat/bridge.py::handle_wechat_message`：try/finally 计时，channel="wechat", endpoint="wechat:on_message"，key_id 留空（微信没 key 概念）。
+
+**新增 admin routes**（`app/routes/services.py`）：
+- `GET /api/services/{sid}/conversations` — list 摘要
+- `GET /api/services/{sid}/conversations/{cid}` — 整段对话（含 messages）
+- `DELETE /api/services/{sid}/conversations/{cid}` — 硬删
+- `GET /api/services/{sid}/usage?limit=&channel=` — 调用记录
+
+### 前端
+
+`frontend/src/services/api.ts` 加 `ServiceConvSummary / ServiceConvDetail / ServiceUsageRecord` 三个 type + 4 个 API 函数。
+
+`frontend/src/pages/AdminServices/index.tsx`：在 service 详情右侧加一个 **"使用情况" `ModuleCard`**，header 用 `Segmented` 切「会话 (N) / 调用 (M)」，刷新按钮重读对应数据。
+- 会话视图：Table 列 [来源 Tag / 标题 / 消息数 / 最近活跃 / 查看·删除]，「查看」打开 `Drawer` 用纯文本+pre-wrap 渲染消息（**没复用 admin 的 MessageBubble** —— 避免拖进 markdown / hljs / Virtuoso 一大套，admin 只是要看一眼，能看清就行）。
+- 调用视图：Table 列 [时间 / 来源 / Endpoint / Key / 会话 / 状态 / 耗时]，会话列点了直接弹 Drawer 看那条会话；上方多一个 channel 过滤 `Segmented`（全部 / 网页 / API / 微信）。
+- 进 service 时 `selectService` 自动并行加载 convs + usage。
+- 来源色：web=blue, api=purple, wechat=green。
+
+### 边界 / 注意
+
+- **「会话」的 source 在 conv 创建时就定了**，是 conv 自己的属性，不是消息的属性。同一个 conv 可以被 web / api / wechat 任意一个**首次**触发创建，之后被多个渠道复用也不会改 source。如果以后要按消息粒度区分，得在 `save_consumer_message` 里加 `source` 字段。
+- **request log 是 fire-and-forget**：`record_request` 内部 try/except 全吞 —— 哪怕 usage_log 文件被锁、磁盘满，也绝不能让 consumer API 返 500。代价是丢日志比丢请求体面。
+- **WeChat 没有 key 概念**：消息从微信扫码 session 走，没经过 sk-svc 鉴权链，`key_id=""`。前端表格 Key 列空就显示 `-`。
+- **不要给 record_request 加 await 或 IO 重试**：现在它是同步的、单 `open(path,"ab") + write` 的 syscall，POSIX 保证 < PIPE_BUF 写入原子，多 worker 并发也不会撕行。改成异步 / 加重试反而引入复杂度和新的丢日志路径。
+- **Drawer 里直接拼字符串**：`m.tool_calls` 用 `JSON.stringify(...).slice(0, 300)` 截断，避免特别大的 tool result 把 Drawer 撑爆。如果以后要展开看完整内容，再加个「展开」按钮。
+- **前端 `usageView` 切「调用」时不会自动重新拉 usage**：进 service 时已经一起拉了一遍，切 tab 只切视图。要刷新得点头部「刷新」按钮或者切 channel 过滤器。这个语义和 react state 流向一致；如果嫌不直观，把 `usageView` 切到 records 时触发一次 `loadSvcUsage` 即可。
+
+---
+
+## MCP / 外部工具
+
+### huozi-mcp（项目级安装，2026-04-23）
+
+- 配置文件：`.cursor/mcp.json`（**项目级**，仅本仓库 Cursor 会加载；`.cursor/` 已在 `.gitignore` 第 72 行，Key 不会被提交）。
+- 端点：`https://cloud.huozi.app/mcp`，HTTP 传输 + `Authorization: Bearer <api_key>`。
+- workspace：`liushinan1998`（key_id `k_f76b3a174a94bf6b`）。
+- Key 是**长期凭据**，被泄露时去 https://huozi.app/workspace 吊销并用 `npx huozi-mcp --client cursor` 或 device-code 流程重新申请。
+- 自部署时把 `HUOZI_CLOUD_URL` 指向自己的实例即可，CLI 流程一致。
+
+### 一次性封面页
+
+- `cover/movable-type.html` —— 活字印刷术封面页 demo，单文件、CDN 依赖（Google Fonts + ECharts SVG 渲染）、纯 CSS 纸纹与朱砂印章、ECharts 横向时间线（毕昇→古腾堡→王选 8 个节点，上下交错避让）。如果以后要做"项目封面/PPT 首页"风格的静态页，可以直接抄这套色板与版式：米色三段渐变 `#fbf3df → #f1e3c0 → #e6d2a3`、朱砂主色 `#9b2a2a`、衬线字体 `Noto Serif SC` + `Cormorant Garamond`、四角 1px 边框 + inset 6px 同色描边的"花边"装饰。
+
+## 文档读取工具与深链跳转（2026-04-24）
+
+### 后端：`app/services/document_tools.py`
+- 两个新工具，均经 `safe_join` + `_is_allowed` 校验，禁止越权：
+  - **`read_document(path)`** — 结构化文本提取
+    - `.pdf` → pypdfium2 全文，每页前注 `[Page N]`
+    - `.docx` → python-docx，按段落保留标题层级
+    - `.xlsx` → openpyxl 转每个 sheet 为 markdown 表格
+    - 纯文本 `.md/.txt/.csv/.json/...` → 提示用 `read_file`（不重复造轮子）
+    - 输出超 `_MAX_TEXT_BYTES=200KB` 自动截断（约 50-70K tokens），提示改用 vision 工具或写脚本
+  - **`view_pdf_page_or_image(path, page=1)`** — 多模态视觉弥补
+    - PDF → pypdfium2 渲染单页为 PNG (`_PDF_RENDER_SCALE=1.5`，约 108 dpi) → base64
+    - 图片（png/jpg/jpeg/webp/gif/bmp）→ base64
+    - **限单页粒度**：PDF 必须传 page 参数（1-based），不允许批量
+    - **运行时 throttle**：`_MAX_VIEW_PER_PATH=5`，同 path 单 thread 超限拒绝（用 `contextvars.ContextVar` 隔离，每请求独立计数；不同 path 计数独立）
+    - 返回 `list[dict]`（`text` + `image_url` block），LangChain 0.3+ ToolNode 自动包成 multimodal `ToolMessage`
+  - 旧版 Office `.doc/.xls/.pptx` 一律返回明确错误，引导用户另存或写脚本
+- **注册策略**：
+  - `agent.py::create_user_agent` — 两个工具**始终注入**（read-only + 路径限制 + throttle，零滥用风险）；`documents` 能力 prompt 无条件追加
+  - `agent.py::create_batch_agent` — 仅注入 `read_document`（视觉工具按行调用太慢/太贵；单行需要 vision 让用户自己写 pypdfium2 脚本）
+  - `consumer_agent.py::_create_consumer_read_tools` — 在 consumer 上下文中重新包一层 `@tool`（path 相对 `docs_dir`、`_is_allowed` 过滤、禁止 `generated/`），复用 `document_tools.py` 的纯函数 `_extract_pdf_text/_extract_docx_text/_extract_xlsx_text/_render_pdf_page_to_png_b64/_read_image_to_b64/_bump_and_check_view_count` + 共享常量 `_PLAIN_TEXT_EXTS/_IMAGE_EXTS`；prompt 同步追加
+- **依赖**：`requirements.txt` 加 `pypdfium2>=4.30.0`（Apache-2.0、纯 wheel、无系统依赖、PDF 文本提取 + 渲染一体）、`python-docx>=1.1.0`、`pillow>=10.0.0`
+- **不进沙箱**：两个工具直接在主进程跑，不走 `script_runner` 子进程沙箱（无需 numpy/matplotlib 类资源限制；本身就是 read-only + path-limited）
+
+### 前端：`<<FILE:/path#anchor>>` 深链跳转
+- **统一语法**：`<<FILE:/docs/x.md#标题>>` / `<<FILE:/docs/x.pdf#page=3>>`，标题不存在静默落到文件顶部（用户明确选择，不报错）
+- **markdown.ts 改造**：
+  - 导出 `slugifyHeading(raw)` 让 FilePreview 能匹配 agent 写的标题文本
+  - `splitPathAndAnchor(raw)` 把 `<<FILE:>>` 体按首个 `#` 拆 `[path, anchor?]`
+  - `filePathToHtml(path, anchor?)`：PDF 直接把 `#anchor` 拼到 iframe `src` —— 浏览器原生 PDF viewer（Chrome/Edge/Firefox）按 Adobe Open Parameters 规范处理 `#page=N`/`#zoom=`/`#search=`，无需 JS plumbing
+  - `nonMediaFileToHtml(path, anchor?)` / `buildRevealAction(path, anchor?)` / `postProcessInlinePaths` 全部传 `data-jf-anchor` 透传给 reveal 委托
+  - 非媒体文件 pill 显示 `📄 name #anchor`，方便用户预判跳转目标（CSS 类 `.jf-file-link-anchor`，accent 色 + monospace）
+  - `INLINE_PATH_RE` 也支持可选 `#anchor`（保守：要含 `/` 且有扩展名）
+  - `SANITIZE_OPTS.ADD_ATTR` 显式列出 `data-jf-file/data-jf-anchor`（DOMPurify 默认放行 data-*，列出仅是文档化）
+- **fileWorkspaceContext.tsx**：
+  - `revealInBrowser(path, anchor?)` 第二参可选；`pendingAnchor: string|null` + `consumePendingAnchor()` 一次性消费协议
+  - 全局 `[data-jf-file]` 点击委托同时读 `data-jf-anchor` → `revealInBrowser(path, anchor)`
+  - **anchor set 顺序**：先 `setPendingAnchor` 再 `await openFile`，保证 MarkdownPreview mount effect 能同步拿到（content 已缓存场景）
+- **FilePreview.tsx**：
+  - `MediaView` (kind='pdf')：`useEffect` 注入 `#${pendingAnchor}` 到 iframe src + 调 `consumePendingAnchor()`；`baseUrl` 永远是裸 `mediaUrl(path)`，避免重复 fragment
+  - `MarkdownPreview`：`useEffect([pendingAnchor, html])` 用 `requestAnimationFrame` 延一帧再做 3 步 fallback 解析：
+    1. `getElementById(anchor)` 直接命中（agent 写了 slug 或 CJK 直传）
+    2. `getElementById(slugifyHeading(anchor))`（agent 写的是原标题文本）
+    3. 遍历 h1-h6 做大小写不敏感的 `textContent.includes(needle)` 子串匹配
+  - 找不到时**静默 no-op**，不弹 toast，符合「找不到打开文件顶部」设计
+  - 一定 `consumePendingAnchor()`（无论是否命中）—— 防止用户切换文件后旧 anchor 重放
+
+### 不要做的事
+- **不要给 read_document 加 `.pptx` 支持**：python-pptx 抽文本噪声大、速度慢；用户写脚本更可控
+- **不要让 view_pdf_page_or_image 一次返回多页**：会让 base64 体积失控 + agent 滥用读长文档；想全文用 read_document
+- **不要尝试解析 PDF 的 PDF outline (bookmark) 跳到标题**：需要 pypdfium2 outline API + 复杂的 page index 转换；当前 `#page=N` 已覆盖 90% 场景
+- **不要给 MarkdownPreview 的 anchor 解析加 toast 报错**：找不到默认行为是「打开文件顶部」，弹错反而打断用户阅读
+- **不要在 chat-inline 的 markdown 渲染里做 anchor 滚动**：聊天气泡里点 `<<FILE:/x.md#标题>>` 应该跳到 FilePreview，不应该在聊天里"原地"滚（聊天里没有完整 markdown 渲染上下文）—— 当前实现就是走 reveal 路径，符合预期
+
+## 聊天框 @ 文件引用（MentionPicker, 2026-04-24）
+
+> 痛点：admin 想让 agent 看自己 docs/scripts/generated 里的某个文件时，必须手动写完整路径（甚至记不住），跟 markdown 渲染层早就支持的 `<<FILE:>>` clickable 形成不闭环。改造目标：在 chat 输入框打 `@<query>` 唤出 fuzzy 候选，回车插入，进 agent 时自动展开成 `<<FILE:>>` —— 与 `data-jf-file` 跳转面板形成 **「输入引用 ↔ 渲染跳转」** 完整闭环。
+
+### 数据流（关键 invariant）
+
+- **前端输入**：用户在 textarea 里看到的是 `[[FILE:/docs/x.md]]`（人类可读、可手动删除/编辑）
+- **后端落库**：`app/routes/chat.py::api_chat` 在调 `save_message` / `stamp_message` 之前先调 `app.services.prompt.expand_file_mentions(canonical_message)`，把 `[[FILE:/path]]` 全部 rewrite 成 `<<FILE:/path>>`
+- **持久化的对话历史 = agent 看到的内容 = markdown.ts 渲染时识别的内容 = `<<FILE:/path>>`**，三者完全一致，没有任何渠道会看到 `[[FILE:>>` 字面字符串
+- `expand_file_mentions` 是幂等的（第二次调用 no-op）；`stamp_message` 也是 idempotent 的，两者前后顺序都安全
+
+### 文件清单
+
+- `app/services/prompt.py::expand_file_mentions(content)` —— 单一来源的 rewrite。接受 str / multimodal-list 两种 content 形态（与 `stamp_message` 完全对称，只处理 `type=="text"` 的 block）。**未来如果 consumer / 微信 bridge 也想支持 @ 引用，直接在它们的入口 import 同一个函数即可，绝不要复制粘贴正则**。
+- `app/routes/files.py::api_list_file_index(root, include_dirs)` —— 新增 `GET /api/files/index`，BFS 走 `storage.list_dir`（local/S3 兼容），返回扁平 entries 列表。**深度上限 12、条目上限 10000、跳过 `__pycache__/node_modules/.git/venv/...` 和 `.DS_Store` 等垃圾**；点开头 (`startswith('.')`) 一律不进索引，避免 `.cursor/.config` 之类污染候选
+- `frontend/src/utils/recentFiles.ts` —— `localStorage[jf-recent-files]` 容量 30 的 most-recent-first 列表；`pushRecentFile` 在 `fileWorkspaceContext.openFile` 成功打开后调用（含 media/binary 分支），用作 fuzzy 排序的 boost 信号
+- `frontend/src/utils/fuzzyMatch.ts` —— subsequence 评分 + 多档 type bonus（exact 50 / startsWith 30 / contains 20 / path-contains 10）+ recent boost（`max(0, 200 - 7*idx)`）。**空 query 时返回 recents 在前的兜底列表**，让"@ + 立即按方向键"也能选最近用过的文件
+- `frontend/src/pages/Chat/components/MentionPicker.tsx` —— 纯展示组件，下拉位于 `inputWrapper` 上方（`position: absolute; bottom: calc(100% + 6px)`，要求 wrapper `position: relative`）。MAX_CANDIDATES=8，匹配字符高亮用 `highlightMatches` 拆段。**键盘事件不在 picker 里处理**，由 chat 页的 `handleKeyDown` 在 textarea 上拦截，避免"focus 跑到 picker 后键盘 routing 复杂"
+- `frontend/src/pages/Chat/index.tsx` —— 集成点：`mention` state（`{active, triggerStart, query, activeIndex}`）+ `detectMentionTrigger(value, cursor)` 词边界检测 + `handleInputChange` 替换 `setInputValue` + `handleKeyDown` 优先消化 `↑↓/Enter/Tab/Esc`（mention active 时）+ `insertMention(item)` 替换 `@<query>` 为 `[[FILE:/path]] `（带尾随空格）+ `requestAnimationFrame` 把光标精准放到 token 末尾
+- `frontend/src/pages/Chat/chat.module.css` 末尾新增 `.mention*` 系列（picker 浮层 + header + list + item active 高亮 + name 匹配字符 primary 色加粗 + dir hint 右对齐 ellipsis）
+
+### 触发规则（不要破坏）
+
+- `@` 必须**前面是行首 / 空格 / `\n` / `\t`**（避免 email / `obj.@prop` 误触发）—— 在 `detectMentionTrigger` 内做检查
+- query（`@` 与光标之间的文本）含任何空白字符立即关闭 picker（用户开始打下一个词，不再属于 mention 上下文）
+- `handleInputChange` 是**唯一**的检测入口；点击改变光标位置不会重新触发 picker，这是有意为之（避免误触）；用户想用 `@` 必须主动打字
+- 发送消息时 `setMention({active: false, ...})` 必须显式重置，否则 streaming 完成后下一条消息可能继承上一次的 mention 状态
+
+### 性能 / 容量
+
+- 文件索引 lazy-load：第一次 `@` 触发时拉 `/api/files/index`，缓存到 `fileIndex` state；同会话期间不再重复请求。**未来若需要刷新（用户在 FilePanel 新建文件后）**：在 `fileWorkspaceContext` 暴露一个 `bumpFileIndexEpoch` 让 chat 页订阅重拉
+- in-memory fuzzy：典型 admin 用户几百到几千文件，subsequence 算法 O(n*m) 实测每次按键 < 5ms，无需 web worker
+- BFS 上限：10000 条目 / depth 12，对正常项目永远不会触顶；触顶时 `truncated: true` 返回，前端目前未渲染该提示（可后续加）
+
+### onMouseDown vs onClick（picker 选择陷阱）
+
+- MentionPicker 内的候选项用 `onMouseDown(e) { e.preventDefault(); onSelect(...) }` —— **不能用 `onClick`**。原因：click 事件 fire 时 textarea 的 blur 已经触发，textarea 的 `onBlur` 会 setTimeout 关闭 picker（120ms 防抖让 mousedown 优先），但即便不关，焦点丢失也会让 `requestAnimationFrame(focus textareaRef)` 行为不可控。`mousedown.preventDefault()` 直接阻止 textarea blur，整个交互保持在 textarea focus 上下文里
+- textarea blur 必须延迟 120ms 关 picker，**不能立即关**：mousedown → blur → click 的事件顺序中，立即关会让 picker DOM 在 click 之前消失，onSelect 永远不触发
+
+### antd TextArea ref 的特殊取法
+
+- antd v5 `Input.TextArea` 的 ref 是 `TextAreaRef`（`{ resizableTextArea: { textArea: HTMLTextAreaElement }, focus, blur, ... }`），**不是直接拿到 `HTMLTextAreaElement`**。`insertMention` 里要操作 `setSelectionRange`，必须从 `el.resizableTextArea.textArea` 取真实 dom：
+  ```ts
+  ref={(el) => {
+    const inner = (el as unknown as { resizableTextArea?: { textArea: HTMLTextAreaElement } } | null)?.resizableTextArea?.textArea ?? null;
+    textareaRef.current = inner;
+  }}
+  ```
+- 不要 `import { TextAreaRef } from 'antd/es/input/TextArea'`（路径不稳定）；inline cast 更轻
+
+### FileTokenInput（contenteditable 芯片输入框，2026-04-24 升级）
+
+- **为什么换掉 antd TextArea**：`textarea` 是纯文本控件，无法在文本内嵌入可点击/可删除的富文本芯片（chip）。contenteditable div 可以把 `[[FILE:]]` token 渲染成交互式小卡片
+- **文件**：`frontend/src/pages/Chat/components/FileTokenInput.tsx`
+- **DOM 结构**（保持平坦，避免浏览器在 Enter 时插入 `<div>` ）：
+  ```
+  <div contenteditable="true">
+    普通文字
+    <span class="jf-token-chip" data-mention-path="/docs/x.pdf" contenteditable="false">
+      <button class="jf-token-chip-x">×</button>  ← hover 时从宽度 0 展开
+      <span class="jf-token-chip-icon">📄</span>
+      <span class="jf-token-chip-name">x.pdf</span>
+    </span>
+    更多文字
+  </div>
+  ```
+- **序列化**：`serializeDom(root)` 逐节点拼字符串，chip 输出 `[[FILE:/path]]`，BR 输出 `\n`，其他节点忽略
+- **反序列化**（仅外部 value 变化时）：`hydrateFromText(root, value, onDelete)` 用正则把 `[[FILE:...]]` 换成 chip DOM 节点；以 `internalValueRef` 跟踪"自己的 onChange"，避免 re-hydrate 死循环
+- **Backspace 芯片删除**：`getChipBeforeCaret` 检测"光标紧贴 chip 后方"时，拦截 Backspace 整体移除 chip span
+- **× 按钮**：用 `mousedown`（不用 `click`）阻止 focus 丢失；CSS 默认 `width:0`，hover 时展开到 16px
+- **文件夹芯片**：chip 上带 `data-jf-is-dir="true"` / `data-jf-file="/path"`，全局 `[data-jf-file]` 点击委托（fileWorkspaceContext）直接识别并导航文件夹
+- **光标偏移**：`getCaretOffset` 用 `Range.cloneContents` 克隆 root→caret 片段再 serialize，优雅处理 chip 和文本混合；`setCaretOffset` 遍历 childNodes 匹配目标偏移
+- **mention 触发**：检测逻辑与原 `detectMentionTrigger` 完全相同；在组件内部的 `syncToParent` 里运行，通过 `onMentionTrigger(null|{triggerStart,query})` 上报，父组件不再需要在 onChange 里自己检测
+- **键盘路由**：`mentionPickerActive=true` 时 ↑↓/Enter/Tab/Esc 经过 `onMentionNavUp/Down/Confirm/Dismiss` 回调上报给父；Enter（无 Shift）→ `onSend`；Shift+Enter → 手动插入 `<br>`；浏览器自动插入的 `<div>` 被 `flattenBrowserWrappers` 展平
+
+### 文件夹点击导航（2026-04-24）
+
+- **问题**：点击 `<<FILE:/some/folder/>>` 或从 `[[FILE:]]` 中引用了一个目录路径时，`revealInBrowser` 调用 `openFile(path)` → `api.readFile(path)` → 报错
+- **修复**（`stores/fileWorkspaceContext.tsx`）：
+  - `revealInBrowser` 新增 `isDir?: boolean` 第三参数
+  - 全局点击委托读取 `el.getAttribute('data-jf-is-dir')`，并同时 fallback 检查 `path.endsWith('/')`
+  - 命中目录逻辑：`setBrowserPath(dirPath); setFileBrowserOpen(true); return` — 不调 `openFile`
+- **chip 的目录检测**：chip span 上设置 `data-jf-is-dir="true"` + `data-jf-file="/path/"`
+
+### 不要做 / 已否决
+
+- **不在前端做 `[[FILE:>>` → `<<FILE:>>` 的 rewrite**：会让发到 agent 的 message 和 textarea 显示的不一致，且 SSE 重放历史时也会麻烦。统一在后端 `chat.py` 一处做 rewrite，单一真相源
+- **不在 service-chat 接入 @-mention**：consumer agent 的文件视图本来就是 `allowed_docs` 限定子集，UX 会和 admin 不一致；且 consumer 大多在微信里用，textarea 输入比例小。如果以后要加，复用 fuzzyMatch / MentionPicker / `expand_file_mentions` 三件套即可，但 `/api/files/index` 需要新增 consumer 版本（按 `allowed_docs` 过滤）
+- **不主动持久化 fileIndex**：每次 chat 页 mount 重拉一次足够新鲜（cost: 一次轻量 BFS）；持久化反而要处理失效
+
+### 端到端验证
+
+- `python -c "from app.services.prompt import expand_file_mentions; ..."` 用例覆盖：纯文本 / 多模态 list / 无 mention / 幂等场景，全部通过
+- fuzzyMatch JS port 单元测试：`wec` + recent boost 让 wechat_send.py 排第一（249 vs 49）；`rep` → report.pdf 50+19；`docs` → 目录 exact 匹配 74 vs 内容文件 10；空 query 推 recents 1000/999；`nope` → 空数组
+- ReadLints 全部 9 个改动文件：0 errors
+- `npx tsc --noEmit`：除已有的 `react-virtuoso` 缺类型声明（环境问题，不在本次改动范围）外，0 errors
+
+## FilePanel 上传进度（2026-04-25）
+
+> 痛点：选/拖一堆文件或一个 200 文件的文件夹，UI 没任何反馈，用户不知道在跑还是卡了；超大文件夹甚至会让 fetch 静默挂十几秒。
+
+- **`api.ts::uploadFilesWithProgress(path, files, keepStructure, onProgress)`**：用 `XMLHttpRequest` 替代 fetch，挂 `xhr.upload.onprogress` 拿字节级进度（fetch 只有 `ReadableStream` 实验性方案，浏览器兼容性差）。自动按 `MAX_BATCH_BYTES=50MB` / `MAX_BATCH_FILES=50` 切批，避免单 request 体积过大触发后端 body-size 限制；`cumulativeLoaded/cumulativeTotal` 跨批次累加，UI 看到的是「整体进度」而不是「当前批次进度」。401 / 网络错误 / 业务失败都映射到 reject 并把后端 `detail` 透出来。
+- **`UploadProgressEvent` 字段**：`{loaded, total, batchIndex, batchCount, cumulativeLoaded, cumulativeTotal, currentFileName, fileCount}` —— `currentFileName` 是当前批次第一个文件的 heuristic（onprogress 只能拿到 XHR 的整体进度，没法对应到具体文件）。
+- **`FilePanel.tsx::runUploadTo(targetDir, files, keepStructure)`** 公共 helper 收口三个旧调用点：button 选择 / 面板根拖拽 / 文件夹行拖拽（`onItemDrop`）。原本三处各自 `await api.uploadFiles + message.success + loadFiles` 重复代码，现在统一走 runUploadTo。
+- **rAF 节流 onProgress 回调**：localhost 上 xhr.upload.onprogress 一秒能触发几十上百次，直接 setState 会让 React 反复 re-render 整个 FilePanel。改用 `pendingTick` + `requestAnimationFrame(flushTick)` 模式，每帧最多 setState 一次。
+- **Sticky 进度横幅** 放在 toolbar 下方、剪贴板提示之上、文件列表之上：旋转 LoadingOutlined + `上传中…/上传文件夹中…` + 文件总数 + 多批时 `第 N/M 批` + `已传字节 / 总字节` + antd `Progress` 条（品牌粉色 `--jf-primary`）+ 当前文件名（截断 + title 提示）。完成后 setTimeout 400ms 移除，让用户看到 100% 瞬间。
+- **不在切批之间 `loadFiles` 刷新**：只在最终成功后刷一次，避免列表抖动；失败时同样不刷新（保持错误前状态）。
+- **Future**：如果将来要做「单文件级进度」（哪个文件正在传），需要把每个文件改成独立 XHR 请求并自己合并进度，权衡是请求数量上去了；当前批量 multipart 是后端友好的方案。
+
+## 文件夹地址点击导航修复（2026-04-25）
+
+- `fileWorkspaceContext.tsx::revealInBrowser(path, anchor?, isDir?)` 不能只依赖 `data-jf-is-dir` 或尾斜杠判断目录。原因：`@文件夹` 输入 chip 会带 `data-jf-is-dir="true"`，但聊天中 agent/markdown 渲染出的普通 `<<FILE:/docs>>` / `<<FILE:/generated/images>>` pill 没有文件系统元数据，而且多数 agent 不会给目录路径补尾斜杠，结果会继续走 `openFile('/docs')` → `api.readFile` → 报「打开文件失败」。
+- 当前修复：在 explicit flag / trailing slash 之外，`revealInBrowser` 会通过**父目录元数据**判断：`api.listFiles(parentDir(path))` 后找到同名 `FileItem`，只有 `item.is_dir === true` 才 `setBrowserPath(path)` + `setFileBrowserOpen(true)` + `setPendingAnchor(null)` 并 return；确认是文件或找不到时才 fall through 到 `openFile(path)`。
+- **不要用 `api.listFiles(path)` 直接探测目录**：某些后端/路径组合对「文件路径」可能返回空列表而不是抛错，前端会误判为“空文件夹”，导致 `<<FILE:/docs/a.md>>` 打不开文件、FilePanel 显示空目录。目录探测必须以父目录 listing 的 `is_dir` 为准。
+- 取舍：普通文件点击会多一次 `GET /api/files?path=<parent>` 元数据请求，再打开文件；但不会弹 toast，且父目录列表通常很小。若未来 FilePanel/markdown 渲染能直接携带 `data-jf-is-dir`，可跳过这个探测。
