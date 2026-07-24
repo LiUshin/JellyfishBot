@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import { Typography, Select, Spin, Tag, Switch, Input, Button, message, Collapse, Tooltip, Divider } from 'antd';
-import { Clock, PaintBrush, Sliders, Lightning, Key, Eye, EyeSlash, CheckCircle, XCircle, ArrowsClockwise, Translate, Faders } from '@phosphor-icons/react';
+import { Typography, Select, Spin, Tag, Switch, Input, Button, message, Collapse, Tooltip, Divider, Segmented } from 'antd';
+import { Clock, PaintBrush, Sliders, Lightning, Key, Eye, EyeSlash, CheckCircle, XCircle, ArrowsClockwise, Translate, Faders, MagnifyingGlass } from '@phosphor-icons/react';
 import type { ModelVisibilityItem } from '../../types';
 import { useTranslation } from 'react-i18next';
 import BatchRunner from '../../components/modals/BatchRunner';
@@ -94,11 +94,15 @@ function StatusDot({ ok }: { ok: boolean | null }) {
     : <XCircle size={16} weight="fill" color="var(--jf-error)" />;
 }
 
+type CredSource = 'platform' | 'user';
+
 function ApiKeysCard() {
   const isMobile = useIsMobile();
   const { t } = useTranslation();
   const [masked, setMasked] = useState<api.ApiKeysMasked | null>(null);
   const [edits, setEdits] = useState<Record<string, string>>({});
+  const [sources, setSources] = useState<Record<string, CredSource>>({});
+  const [sourcesDirty, setSourcesDirty] = useState(false);
   const [showRaw, setShowRaw] = useState<Record<string, boolean>>({});
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
@@ -160,6 +164,15 @@ function ApiKeysCard() {
       ],
     },
     {
+      title: 'OpenRouter',
+      fields: [
+        { field: 'openrouter_api_key', label: 'API Key', placeholder: 'sk-or-...',
+          helpUrl: 'https://openrouter.ai/keys', helpText: t('general.apiKeysHelpText') },
+        { field: 'openrouter_base_url', label: t('general.apiKeysBaseUrlOpt'),
+          placeholder: t('general.apiKeysBaseUrlOpenRouter'), isUrl: true },
+      ],
+    },
+    {
       title: '搜索 (Tavily)',
       displayTitleKey: 'general.apiKeysSearchTavily',
       fields: [
@@ -170,11 +183,22 @@ function ApiKeysCard() {
   ];
 
   useEffect(() => {
-    api.getApiKeys().then(k => { setMasked(k); setLoading(false); }).catch(() => setLoading(false));
+    api.getApiKeys().then(k => {
+      setMasked(k);
+      const src = (k.credential_sources || {}) as Record<string, CredSource>;
+      setSources(src);
+      setSourcesDirty(false);
+      setLoading(false);
+    }).catch(() => setLoading(false));
   }, []);
 
   const handleChange = (field: string, value: string) => {
     setEdits(prev => ({ ...prev, [field]: value }));
+  };
+
+  const handleSourceChange = (provider: string, src: CredSource) => {
+    setSources(prev => ({ ...prev, [provider]: src }));
+    setSourcesDirty(true);
   };
 
   const handleSave = async () => {
@@ -182,12 +206,19 @@ function ApiKeysCard() {
     for (const [k, v] of Object.entries(edits)) {
       if (v !== undefined) updates[k] = v;
     }
-    if (!Object.keys(updates).length) return;
+    if (!Object.keys(updates).length && !sourcesDirty) return;
     setSaving(true);
     try {
-      const res = await api.updateApiKeys(updates);
+      const res = await api.updateApiKeys({
+        ...updates,
+        ...(sourcesDirty ? { credential_sources: sources } : {}),
+      });
       setMasked(res.keys);
+      if (res.keys.credential_sources) {
+        setSources(res.keys.credential_sources as Record<string, CredSource>);
+      }
       setEdits({});
+      setSourcesDirty(false);
       message.success(t('general.apiKeysSaved'));
     } catch (e: unknown) {
       message.error(e instanceof Error ? e.message : t('common.saveFailed'));
@@ -219,15 +250,17 @@ function ApiKeysCard() {
 
   if (loading) return <Spin size="small" />;
 
-  const hasEdits = Object.keys(edits).length > 0;
+  const hasEdits = Object.keys(edits).length > 0 || sourcesDirty;
   const providerMap: Record<string, string> = {
     'Anthropic (Claude)': 'anthropic',
     'OpenAI': 'openai',
     'Kimi (Moonshot)': 'kimi',
     'MiniMax（语音/视频/对话）': 'minimax',
     'AWS Bedrock': 'bedrock',
+    'OpenRouter': 'openrouter',
     '搜索 (Tavily)': 'tavily',
   };
+  const platformConfigured = (masked?.platform_configured || {}) as Record<string, boolean>;
 
   return (
     <div style={{
@@ -278,11 +311,23 @@ function ApiKeysCard() {
           const prov = providerMap[section.title] || '';
           const testRes = testResults[prov];
           const displayTitle = section.displayTitleKey ? t(section.displayTitleKey) : section.title;
+          const activeSource: CredSource = (sources[prov] as CredSource) || 'platform';
+          const platOk = !!platformConfigured[prov];
           return {
             key: section.title,
             label: (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <Text style={{ color: C.text, fontSize: 13, fontWeight: 500 }}>{displayTitle}</Text>
+                {prov && (
+                  <Tag
+                    style={{ margin: 0, fontSize: 11, lineHeight: '18px' }}
+                    color={activeSource === 'platform' ? 'cyan' : 'purple'}
+                  >
+                    {activeSource === 'platform'
+                      ? t('general.apiKeysSourcePlatformTag')
+                      : t('general.apiKeysSourceUserTag')}
+                  </Tag>
+                )}
                 <StatusDot ok={testRes ? testRes.ok : null} />
                 {testRes && !testRes.ok && testRes.error && (
                   <Text style={{ color: 'var(--jf-error)', fontSize: 11 }}>{testRes.error}</Text>
@@ -291,6 +336,40 @@ function ApiKeysCard() {
             ),
             children: (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingBottom: 8 }}>
+                {prov && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                      <Text style={{ color: C.muted, fontSize: 12 }}>{t('general.apiKeysSourceLabel')}</Text>
+                      <Segmented
+                        size="small"
+                        value={activeSource}
+                        onChange={(v) => handleSourceChange(prov, v as CredSource)}
+                        options={[
+                          {
+                            value: 'platform',
+                            label: t('general.apiKeysSourcePlatform'),
+                          },
+                          {
+                            value: 'user',
+                            label: t('general.apiKeysSourceUser'),
+                          },
+                        ]}
+                      />
+                      {activeSource === 'platform' && (
+                        <Text style={{ color: C.muted, fontSize: 11 }}>
+                          {platOk
+                            ? t('general.apiKeysPlatformReady')
+                            : t('general.apiKeysPlatformMissing')}
+                        </Text>
+                      )}
+                    </div>
+                    <Text style={{ color: C.muted, fontSize: 11 }}>
+                      {activeSource === 'platform'
+                        ? t('general.apiKeysSourcePlatformHint')
+                        : t('general.apiKeysSourceUserHint')}
+                    </Text>
+                  </div>
+                )}
                 {section.fields.map(f => {
                   const isSecret = !f.isUrl;
                   const configured = masked?.[`${f.field}_configured`] as boolean | undefined;
@@ -391,7 +470,239 @@ const PROVIDER_LABELS: Record<string, string> = {
   kimi: 'Kimi (Moonshot)',
   minimax: 'MiniMax',
   bedrock: 'AWS Bedrock',
+  openrouter: 'OpenRouter',
 };
+
+function remoteSupportsReasoning(m: api.OpenRouterRemoteModel): boolean {
+  const params = m.supported_parameters;
+  if (!Array.isArray(params)) return false;
+  return params.some(p => p === 'reasoning' || p === 'include_reasoning');
+}
+
+function OpenRouterModelsCard() {
+  const { t } = useTranslation();
+  const isMobile = useIsMobile();
+  const [enabled, setEnabled] = useState<api.OpenRouterEnabledModel[]>([]);
+  const [remote, setRemote] = useState<api.OpenRouterRemoteModel[]>([]);
+  const [query, setQuery] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const loadAll = async () => {
+    setLoading(true);
+    try {
+      const [wl, models] = await Promise.all([
+        api.getOpenRouterEnabledModels(),
+        api.fetchOpenRouterRemoteModels(),
+      ]);
+      setEnabled(wl.models || []);
+      setRemote(models);
+    } catch (e: unknown) {
+      message.error(e instanceof Error ? e.message : t('general.openrouterLoadFailed'));
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { void loadAll(); }, []);
+
+  const enabledMap = enabled.reduce<Record<string, api.OpenRouterEnabledModel>>((acc, m) => {
+    acc[m.id] = m;
+    return acc;
+  }, {});
+
+  const persist = async (next: api.OpenRouterEnabledModel[]) => {
+    setSaving(true);
+    const prev = enabled;
+    setEnabled(next);
+    try {
+      const res = await api.setOpenRouterEnabledModels(next);
+      setEnabled(res.models || next);
+      message.success(t('general.openrouterSaved'));
+    } catch {
+      setEnabled(prev);
+      message.error(t('common.saveFailed'));
+    }
+    setSaving(false);
+  };
+
+  const handleToggle = (m: api.OpenRouterRemoteModel, on: boolean) => {
+    if (on) {
+      const row: api.OpenRouterEnabledModel = {
+        id: m.id,
+        name: m.name || m.id,
+        reasoning: enabledMap[m.id]?.reasoning ?? remoteSupportsReasoning(m),
+      };
+      void persist([...enabled.filter(x => x.id !== m.id), row]);
+    } else {
+      void persist(enabled.filter(x => x.id !== m.id));
+    }
+  };
+
+  const handleReasoning = (id: string, reasoning: boolean) => {
+    if (!enabledMap[id]) return;
+    void persist(enabled.map(m => (m.id === id ? { ...m, reasoning } : m)));
+  };
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      const models = await api.fetchOpenRouterRemoteModels();
+      setRemote(models);
+      message.success(t('general.openrouterRefreshed', { count: models.length }));
+    } catch (e: unknown) {
+      message.error(e instanceof Error ? e.message : t('general.openrouterLoadFailed'));
+    }
+    setRefreshing(false);
+  };
+
+  const q = query.trim().toLowerCase();
+  const filtered = !q
+    ? remote
+    : remote.filter(m => {
+        const hay = `${m.id} ${m.name || ''} ${m.description || ''}`.toLowerCase();
+        return hay.includes(q);
+      });
+
+  // Prefer showing enabled models first in search results (stable slice for UX).
+  const sorted = [...filtered].sort((a, b) => {
+    const ae = enabledMap[a.id] ? 0 : 1;
+    const be = enabledMap[b.id] ? 0 : 1;
+    if (ae !== be) return ae - be;
+    return (a.name || a.id).localeCompare(b.name || b.id);
+  });
+  const visible = sorted.slice(0, 80);
+
+  const cardBase: React.CSSProperties = {
+    background: C.bg2,
+    borderRadius: 'var(--jf-radius-lg)',
+    border: `1px solid ${C.border}`,
+    padding: isMobile ? '16px 14px' : '20px 24px',
+    marginBottom: 16,
+  };
+
+  return (
+    <div style={cardBase}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <MagnifyingGlass size={18} color={C.primary} />
+          <Text style={{ color: C.text, fontSize: 14, fontWeight: 500 }}>
+            {t('general.openrouterModelsTitle')}
+          </Text>
+          {saving && <Spin size="small" />}
+        </div>
+        <Button
+          size="small"
+          icon={<ArrowsClockwise size={14} />}
+          onClick={() => void handleRefresh()}
+          loading={refreshing}
+        >
+          {t('general.openrouterRefresh')}
+        </Button>
+      </div>
+      <Text style={{ color: C.muted, fontSize: 12, display: 'block', marginBottom: 12 }}>
+        {t('general.openrouterModelsDesc')}
+      </Text>
+
+      <Input
+        size="small"
+        allowClear
+        prefix={<MagnifyingGlass size={14} color={C.muted} />}
+        placeholder={t('general.openrouterSearchPh')}
+        value={query}
+        onChange={e => setQuery(e.target.value)}
+        style={{ marginBottom: 12 }}
+      />
+
+      {enabled.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <Text style={{ color: C.muted, fontSize: 11, display: 'block', marginBottom: 6 }}>
+            {t('general.openrouterEnabledCount', { count: enabled.length })}
+          </Text>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {enabled.map(m => (
+              <Tag
+                key={m.id}
+                closable
+                onClose={(e) => {
+                  e.preventDefault();
+                  void persist(enabled.filter(x => x.id !== m.id));
+                }}
+                color={m.reasoning ? 'purple' : 'default'}
+                style={{ marginInlineEnd: 0 }}
+              >
+                {m.name || m.id}
+              </Tag>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <Spin size="small" />
+      ) : remote.length === 0 ? (
+        <Text style={{ color: C.muted, fontSize: 13 }}>{t('general.openrouterEmpty')}</Text>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 360, overflowY: 'auto' }}>
+          {visible.map(m => {
+            const on = !!enabledMap[m.id];
+            const reasoning = enabledMap[m.id]?.reasoning ?? remoteSupportsReasoning(m);
+            return (
+              <div
+                key={m.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '6px 10px',
+                  borderRadius: 'var(--jf-radius)',
+                  opacity: on ? 1 : 0.7,
+                  gap: 8,
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <Text style={{ color: C.text, fontSize: 13 }}>{m.name || m.id}</Text>
+                    {remoteSupportsReasoning(m) && (
+                      <Tag color="orange" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', marginInlineEnd: 0 }}>
+                        reasoning
+                      </Tag>
+                    )}
+                  </div>
+                  <Text style={{ color: C.muted, fontSize: 11 }}>{m.id}</Text>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+                  {on && (
+                    <Tooltip title={t('general.openrouterReasoningTip')}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <Text style={{ color: C.muted, fontSize: 11 }}>{t('general.openrouterReasoning')}</Text>
+                        <Switch
+                          size="small"
+                          checked={reasoning}
+                          onChange={(v) => handleReasoning(m.id, v)}
+                        />
+                      </div>
+                    </Tooltip>
+                  )}
+                  <Switch
+                    size="small"
+                    checked={on}
+                    onChange={(v) => handleToggle(m, v)}
+                  />
+                </div>
+              </div>
+            );
+          })}
+          {filtered.length > visible.length && (
+            <Text style={{ color: C.muted, fontSize: 11, padding: '4px 10px' }}>
+              {t('general.openrouterTruncated', { shown: visible.length, total: filtered.length })}
+            </Text>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const TIER_COLORS: Record<string, string> = {
   thinking: 'purple',
@@ -605,6 +916,9 @@ export default function GeneralPage() {
 
       {/* API Keys */}
       <ApiKeysCard />
+
+      {/* OpenRouter whitelist (search latest + enable) */}
+      <OpenRouterModelsCard />
 
       {/* Model Visibility */}
       <ModelVisibilityCard />

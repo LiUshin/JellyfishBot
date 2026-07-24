@@ -38,7 +38,7 @@ import tempfile
 import time
 import zipfile
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.core.security import get_user_dir
 from app.core.encryption import decrypt_value, encrypt_value
@@ -228,6 +228,8 @@ def _export_api_keys_into_zip(zf: zipfile.ZipFile, user_id: str) -> bool:
         return False
     plain: Dict[str, str] = {}
     for field_name, value in stored.items():
+        if field_name == "credential_sources":
+            continue
         if not value or not isinstance(value, str):
             continue
         if field_name in _SECRET_FIELDS:
@@ -239,9 +241,11 @@ def _export_api_keys_into_zip(zf: zipfile.ZipFile, user_id: str) -> bool:
                 continue
         elif field_name in _URL_FIELDS:
             plain[field_name] = value
+    sources = stored.get("credential_sources")
     payload = {
         "_warning": "PLAINTEXT API KEYS — keep this backup ZIP private!",
         "keys": plain,
+        "credential_sources": sources if isinstance(sources, dict) else {},
     }
     zf.writestr(
         "api_keys.PLAINTEXT.json",
@@ -384,7 +388,7 @@ def _import_api_keys_from_zip(zf: zipfile.ZipFile, user_id: str) -> int:
     if not isinstance(plain, dict):
         return 0
     keys_path = os.path.join(get_user_dir(user_id), "api_keys.json")
-    current: Dict[str, str] = {}
+    current: Dict[str, Any] = {}
     if os.path.isfile(keys_path):
         try:
             with open(keys_path, "r", encoding="utf-8") as f:
@@ -404,6 +408,10 @@ def _import_api_keys_from_zip(zf: zipfile.ZipFile, user_id: str) -> int:
         elif k in _URL_FIELDS:
             current[k] = v.rstrip("/")
             imported += 1
+    sources = payload.get("credential_sources")
+    if isinstance(sources, dict) and sources:
+        current["credential_sources"] = sources
+        imported += 1
     os.makedirs(os.path.dirname(keys_path), exist_ok=True)
     from app.core.fileutil import atomic_json_save
     atomic_json_save(keys_path, current, ensure_ascii=False, indent=2)

@@ -2,7 +2,7 @@
  * Lightweight unified-diff with hunk slicing.
  *
  * 不依赖 jsdiff（~50KB gz）。流程：
- *   1. 把 oldText 在 originalText 中定位 → 算出旧片段的起止行
+ *   1. 把 oldText（编辑已落盘时则是 newText）在 originalText 中定位 → 算出片段的起止行
  *   2. 用旧片段 lines / 新片段 lines 做行级 LCS-like 对齐（与 ApprovalCard
  *      内的 computeLineDiff 同一思路），得到改动行序列
  *   3. 把改动行序列回填到原文件视图：旧片段范围内按对齐结果展开为
@@ -34,10 +34,17 @@ export interface DiffResult {
   /** 修改后的整文件行数（用于「展开全文」视图分页判断） */
   totalNewLines: number;
   hunks: DiffHunk[];
-  /** 失败原因：'not_found' = old_string 没在原文里找到（agent 写错了 / 文件已被改） */
+  /** 失败原因：'not_found' = old_string / new_string 都没在原文里找到（agent 写错了 / 文件已被改） */
   error: 'not_found' | null;
+  /** 原文件里已经是 new_string（编辑已落盘），diff 由还原 old_string 反推得到 */
+  alreadyApplied: boolean;
   /** 展开全文用：完整的 DiffLine 序列（不切 hunk） */
   fullDiff: DiffLine[];
+}
+
+/** 统一换行，避免 CRLF 文件与 LLM 输出的 LF 片段匹配不上。 */
+function normalizeEol(text: string): string {
+  return text.replace(/\r\n/g, '\n');
 }
 
 /**
@@ -45,6 +52,10 @@ export interface DiffResult {
  *
  * 注意：deepagents 的 edit_file 内置语义就是「替换第一次出现」，这里和后端
  * 行为对齐（不做全局替换）。
+ *
+ * originalText 是「当前磁盘内容」，它可能处于编辑前或编辑后两种状态：
+ * 待审批时含 oldString；编辑已落盘（YOLO / 批准后 / 历史回看）时含 newString。
+ * 后者反过来把 newString 还原成 oldString，即可推出编辑前内容照常出 diff。
  */
 export function computeUnifiedDiff(
   originalText: string,
@@ -52,31 +63,45 @@ export function computeUnifiedDiff(
   newString: string,
   contextLines = 3,
 ): DiffResult {
-  const idx = originalText.indexOf(oldString);
-  if (idx < 0) {
-    // 旧字符串不在文件里：可能 agent 写错；或文件已被改。
-    // 退化策略：全文 vs 全文+附 newString diff（用户至少看到 new_string 是什么）
-    return {
-      totalNewLines: newString.split('\n').length,
-      hunks: [],
-      error: 'not_found',
-      fullDiff: [],
-    };
+  const original = normalizeEol(originalText);
+  const oldStr = normalizeEol(oldString);
+  const newStr = normalizeEol(newString);
+
+  let beforeText: string;
+  let afterText: string;
+  let alreadyApplied = false;
+
+  const idx = original.indexOf(oldStr);
+  if (idx >= 0) {
+    beforeText = original;
+    afterText = original.slice(0, idx) + newStr + original.slice(idx + oldStr.length);
+  } else {
+    // newStr 为空时 indexOf 恒为 0，会把「纯删除」误判成已落盘，必须先排除。
+    const appliedIdx = newStr ? original.indexOf(newStr) : -1;
+    if (appliedIdx < 0) {
+      // 两个片段都不在文件里：agent 写错，或文件被第三方改过。
+      // 退化策略：交给调用方显示双段对照（用户至少看到 new_string 是什么）
+      return {
+        totalNewLines: newStr.split('\n').length,
+        hunks: [],
+        error: 'not_found',
+        alreadyApplied: false,
+        fullDiff: [],
+      };
+    }
+    alreadyApplied = true;
+    beforeText = original.slice(0, appliedIdx) + oldStr + original.slice(appliedIdx + newStr.length);
+    afterText = original;
   }
 
-  // 用替换结果生成新文件
-  const newText = originalText.slice(0, idx) + newString + originalText.slice(idx + oldString.length);
-
-  const oldLines = originalText.split('\n');
-  const newLines = newText.split('\n');
-
-  const fullDiff = lineDiff(oldLines, newLines);
+  const fullDiff = lineDiff(beforeText.split('\n'), afterText.split('\n'));
   const hunks = sliceHunks(fullDiff, contextLines);
 
   return {
-    totalNewLines: newLines.length,
+    totalNewLines: afterText.split('\n').length,
     hunks,
     error: null,
+    alreadyApplied,
     fullDiff,
   };
 }

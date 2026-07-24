@@ -21,6 +21,10 @@ _DEFAULTS: Dict[str, Any] = {
     "language": "",
     # 用户主动隐藏的 LLM model ID 列表（不在对话框显示）。默认空 = 全部显示。
     "hidden_models": [],
+    # OpenRouter 白名单：从官方 models list 勾选开放的条目。
+    # 形如 [{"id":"anthropic/claude-sonnet-4","name":"...","reasoning":true}, ...]
+    # Chat/Service 里以 catalog id ``openrouter:{id}`` 出现。
+    "openrouter_enabled_models": [],
 }
 
 # capability_defaults 内允许的 key
@@ -66,7 +70,10 @@ def get_tz_offset(user_id: str) -> float:
 
 def update_preferences(user_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
     prefs = get_preferences(user_id)
-    allowed_keys = {"tz_offset_hours", "capability_defaults", "language", "hidden_models"}
+    allowed_keys = {
+        "tz_offset_hours", "capability_defaults", "language",
+        "hidden_models", "openrouter_enabled_models",
+    }
     for k, v in updates.items():
         if k not in allowed_keys:
             continue
@@ -89,6 +96,9 @@ def update_preferences(user_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
         elif k == "hidden_models":
             if isinstance(v, list):
                 prefs["hidden_models"] = [m for m in v if isinstance(m, str)]
+        elif k == "openrouter_enabled_models":
+            if isinstance(v, list):
+                prefs["openrouter_enabled_models"] = _normalize_openrouter_enabled(v)
         else:
             prefs[k] = v
     path = _pref_path(user_id)
@@ -122,3 +132,46 @@ def get_hidden_models(user_id: str) -> list:
 def set_hidden_models(user_id: str, hidden: list) -> None:
     """更新用户的隐藏 model 列表。"""
     update_preferences(user_id, {"hidden_models": hidden})
+
+
+def _normalize_openrouter_enabled(items: list) -> list:
+    """Sanitize whitelist entries to {id, name, reasoning}."""
+    out = []
+    seen = set()
+    for item in items:
+        if isinstance(item, str):
+            mid = item.strip()
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
+            out.append({"id": mid, "name": mid, "reasoning": False})
+            continue
+        if not isinstance(item, dict):
+            continue
+        mid = str(item.get("id") or "").strip()
+        if not mid or mid in seen:
+            continue
+        # Strip accidental openrouter: prefix from stored slug
+        if mid.startswith("openrouter:"):
+            mid = mid.split(":", 1)[1]
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        name = str(item.get("name") or item.get("display_name") or mid).strip() or mid
+        reasoning = bool(item.get("reasoning"))
+        out.append({"id": mid, "name": name, "reasoning": reasoning})
+    return out
+
+
+def get_openrouter_enabled_models(user_id: str) -> list:
+    """Return sanitized OpenRouter whitelist entries."""
+    raw = get_preferences(user_id).get("openrouter_enabled_models") or []
+    if not isinstance(raw, list):
+        return []
+    return _normalize_openrouter_enabled(raw)
+
+
+def set_openrouter_enabled_models(user_id: str, items: list) -> list:
+    """Replace OpenRouter whitelist; returns normalized list."""
+    prefs = update_preferences(user_id, {"openrouter_enabled_models": items})
+    return list(prefs.get("openrouter_enabled_models") or [])

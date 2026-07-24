@@ -38,6 +38,8 @@ const KNOWN_ENV_KEYS: &[&str] = &[
     "OPENAI_BASE_URL",
     "BEDROCK_API_KEY",
     "BEDROCK_REGION",
+    "OPENROUTER_API_KEY",
+    "OPENROUTER_BASE_URL",
     "KIMI_API_KEY",
     "KIMI_BASE_URL",
     "MINIMAX_API_KEY",
@@ -1465,6 +1467,7 @@ fn get_admin_key_status(
                         ("minimax_api_key", "MiniMax"),
                         ("doubao_access_key", "豆包"),
                         ("bedrock_api_key", "Bedrock"),
+                        ("openrouter_api_key", "OpenRouter"),
                     ];
                     for (field, label) in map {
                         let configured = obj

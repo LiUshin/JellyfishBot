@@ -495,6 +495,21 @@ async def _stream_agent(agent, agent_input, config, user_id, conv_id, yolo: bool
 
                 additional = getattr(msg, "additional_kwargs", {}) or {}
                 reasoning = additional.get("reasoning_content") or additional.get("reasoning", "")
+                # OpenRouter: reasoning_details is a list of {type,text/...} blocks
+                if not (isinstance(reasoning, str) and reasoning):
+                    details = additional.get("reasoning_details")
+                    if isinstance(details, list):
+                        parts = []
+                        for d in details:
+                            if isinstance(d, dict):
+                                parts.append(
+                                    d.get("text") or d.get("summary") or d.get("content") or ""
+                                )
+                            elif isinstance(d, str):
+                                parts.append(d)
+                        reasoning = "".join(p for p in parts if p)
+                    elif isinstance(details, str):
+                        reasoning = details
                 if isinstance(reasoning, str) and reasoning:
                     if not is_sub:
                         _blk_append_thinking(reasoning)

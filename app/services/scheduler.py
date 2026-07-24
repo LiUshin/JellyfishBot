@@ -106,6 +106,41 @@ def scheduler_concurrency_slots() -> int:
 _MAX_RUNS_STORED = 20
 _TASK_TIMEOUT_S  = 1800        # max 30 min per task run
 
+# ── Runaway guards ────────────────────────────────────────────────────────
+# A task whose next_run_at keeps landing in the past re-fires the instant the
+# previous run finishes, burning one full agent + LLM call per cycle.  The
+# root cause (once-tasks with an empty schedule) is fixed in
+# `_compute_next_run`, but these two guards bound the blast radius of any
+# future scheduling bug.  Both are applied in `_apply_post_run_schedule`,
+# i.e. only when re-scheduling **after** a run — never at creation time, so
+# "create and fire ASAP" ergonomics stay intact.
+_DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
+_DEFAULT_MIN_RUN_INTERVAL_S = 5
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        n = int(raw, 10)
+    except ValueError:
+        log.warning("Invalid %s=%r — using default %d", name, raw, default)
+        return default
+    return max(minimum, n)
+
+
+def max_consecutive_failures() -> int:
+    """连续失败多少次后自动禁用任务。0 = 关闭该保护。"""
+    return _env_int("SCHEDULER_MAX_CONSECUTIVE_FAILURES",
+                    _DEFAULT_MAX_CONSECUTIVE_FAILURES)
+
+
+def min_run_interval_seconds() -> int:
+    """同一任务两次执行之间的最小间隔秒数。0 = 关闭该保护。"""
+    return _env_int("SCHEDULER_MIN_RUN_INTERVAL_S",
+                    _DEFAULT_MIN_RUN_INTERVAL_S)
+
 # Bound the heap-driven idle wait so we still wake up to re-scan the disk
 # periodically (catches: out-of-band edits, clock jumps, missed wake_event,
 # dropped tasks if a future bug).  Not a polling interval — only used when
@@ -447,6 +482,7 @@ def _new_task_meta_v2(scope: Literal["admin", "service"], uid: str,
         "created_at": now.isoformat(),
         "last_run_at": None,
         "next_run_at": None,
+        "consecutive_failures": 0,
         "runs": [],
         # v2 spawn-tree fields
         "parent_task_id": parent_task_id,
@@ -518,6 +554,10 @@ def update_task(user_id: str, task_id: str, updates: Dict[str, Any]) -> Optional
     for k, v in updates.items():
         if k not in protected:
             task[k] = v
+    # Re-enabling grants a fresh failure budget, otherwise a task auto-disabled
+    # by the circuit breaker would trip again on its very next failure.
+    if updates.get("enabled") is True:
+        task["consecutive_failures"] = 0
     if any(k in updates for k in ("schedule_type", "schedule", "enabled")):
         now = datetime.now(timezone.utc)
         task["next_run_at"] = _compute_next_run(task, now) if task["enabled"] else None
@@ -632,6 +672,8 @@ def update_service_task(
     for k, v in updates.items():
         if k not in protected:
             task[k] = v
+    if updates.get("enabled") is True:
+        task["consecutive_failures"] = 0
     if any(k in updates for k in ("schedule_type", "schedule", "enabled")):
         now = datetime.now(timezone.utc)
         task["next_run_at"] = _compute_next_run(task, now) if task["enabled"] else None
@@ -849,8 +891,14 @@ def _compute_next_run(task: Dict[str, Any], after: datetime) -> Optional[str]:
         # so spawn_child_task's default ergonomics (no schedule arg → run now)
         # work cleanly.  v1 callers that omitted the time still got None here
         # and were silently dropped, so this loosening doesn't break old data.
+        #
+        # "ASAP" is strictly a *creation-time* affordance.  `last_run_at` is
+        # written before this is called from the execute paths, so a task that
+        # has already fired reports None and the `once` contract holds.  Without
+        # this check next_run_at resolves to "just now" on every cycle and the
+        # heap re-fires the task forever (one agent + LLM call per iteration).
         if not sched or sched.strip().lower() == "now":
-            return after.isoformat()
+            return after.isoformat() if not task.get("last_run_at") else None
         try:
             dt = datetime.fromisoformat(sched)
             if dt.tzinfo is None:
@@ -873,6 +921,52 @@ def _compute_next_run(task: Dict[str, Any], after: datetime) -> Optional[str]:
             return None
 
     return None
+
+
+def _apply_post_run_schedule(task: Dict[str, Any], status: str,
+                             finished: datetime) -> Optional[str]:
+    """Re-schedule a task after a run, with the runaway guards applied.
+
+    Mutates ``task`` in place (``consecutive_failures`` / ``enabled`` /
+    ``next_run_at``) and returns a human-readable reason when the task was
+    auto-disabled, so the caller can surface it in the run's step log.
+
+    Shared by the admin and service execute paths — keep them in sync by
+    changing only this function.
+    """
+    if status == "success":
+        task["consecutive_failures"] = 0
+    else:
+        task["consecutive_failures"] = int(
+            task.get("consecutive_failures", 0)) + 1
+
+    disabled_reason: Optional[str] = None
+    fail_limit = max_consecutive_failures()
+    if fail_limit and task["consecutive_failures"] >= fail_limit:
+        task["enabled"] = False
+        disabled_reason = (
+            f"连续失败 {task['consecutive_failures']} 次"
+            f"（上限 {fail_limit}），任务已自动禁用。"
+            "修复问题后可在定时任务页重新启用。"
+        )
+
+    # Must run after the enabled flag above — a disabled task yields None.
+    next_run = _compute_next_run(task, finished)
+
+    floor_s = min_run_interval_seconds()
+    if next_run and floor_s:
+        epoch = _parse_next_run_epoch(next_run)
+        earliest = finished + timedelta(seconds=floor_s)
+        if epoch is not None and epoch < earliest.timestamp():
+            log.warning(
+                "Task %s: next_run_at %s is within %ds of this run — "
+                "clamping to %s to avoid a hot re-fire loop",
+                task.get("id"), next_run, floor_s, earliest.isoformat(),
+            )
+            next_run = earliest.isoformat()
+
+    task["next_run_at"] = next_run
+    return disabled_reason
 
 
 # ── Task execution ────────────────────────────────────────────────────────
@@ -1682,7 +1776,11 @@ async def _execute_task(user_id: str, task_id: str) -> None:
     runs.append(run_record)
     task["runs"] = runs[-_MAX_RUNS_STORED:]
     task["last_run_at"] = started.isoformat()
-    task["next_run_at"] = _compute_next_run(task, finished)
+    disabled_reason = _apply_post_run_schedule(task, status, finished)
+    if disabled_reason:
+        log.warning("Task %s auto-disabled: %s", task_id, disabled_reason)
+        run_record.setdefault("steps", []).append(
+            _step("error", disabled_reason))
     _save_task(user_id, task)
     _heap_upsert("admin", user_id, task_id, task.get("next_run_at"))
 
@@ -1768,7 +1866,12 @@ async def _execute_service_task(admin_id: str, service_id: str, task_id: str) ->
     runs.append(run_record)
     task["runs"] = runs[-_MAX_RUNS_STORED:]
     task["last_run_at"] = started.isoformat()
-    task["next_run_at"] = _compute_next_run(task, finished)
+    disabled_reason = _apply_post_run_schedule(task, status, finished)
+    if disabled_reason:
+        log.warning("Service task %s/%s auto-disabled: %s",
+                    service_id, task_id, disabled_reason)
+        run_record.setdefault("steps", []).append(
+            _step("error", disabled_reason))
     _save_service_task(admin_id, service_id, task)
     _heap_upsert("service", admin_id, task_id, task.get("next_run_at"),
                  service_id=service_id)

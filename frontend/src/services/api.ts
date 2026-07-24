@@ -1045,7 +1045,9 @@ export interface ApiKeysMasked {
   anthropic_base_url: string;
   tavily_api_key: string;
   tavily_api_key_configured: boolean;
-  [key: string]: string | boolean;
+  credential_sources?: Record<string, 'platform' | 'user'>;
+  platform_configured?: Record<string, boolean>;
+  [key: string]: string | boolean | Record<string, string> | Record<string, boolean> | undefined;
 }
 
 export interface ApiKeysTestResult {
@@ -1056,7 +1058,9 @@ export async function getApiKeys(): Promise<ApiKeysMasked> {
   return request('GET', '/settings/api-keys');
 }
 
-export async function updateApiKeys(keys: Record<string, string>): Promise<{ success: boolean; keys: ApiKeysMasked }> {
+export async function updateApiKeys(
+  keys: Record<string, string | Record<string, string>>,
+): Promise<{ success: boolean; keys: ApiKeysMasked }> {
   return request('PUT', '/settings/api-keys', keys);
 }
 
@@ -1066,6 +1070,53 @@ export async function testApiKeys(provider: string): Promise<ApiKeysTestResult> 
 
 export async function getApiKeysStatus(): Promise<ApiKeysStatus> {
   return request('GET', '/settings/api-keys/status');
+}
+
+// ===== OpenRouter whitelist =====
+
+export interface OpenRouterEnabledModel {
+  id: string;
+  name: string;
+  reasoning: boolean;
+}
+
+export interface OpenRouterRemoteModel {
+  id: string;
+  name?: string;
+  description?: string;
+  context_length?: number;
+  supported_parameters?: string[];
+  architecture?: { modality?: string; input_modalities?: string[]; output_modalities?: string[] };
+  [key: string]: unknown;
+}
+
+export async function getOpenRouterEnabledModels(): Promise<{ models: OpenRouterEnabledModel[] }> {
+  return request('GET', '/settings/openrouter/enabled-models');
+}
+
+export async function setOpenRouterEnabledModels(
+  models: OpenRouterEnabledModel[],
+): Promise<{ success: boolean; models: OpenRouterEnabledModel[] }> {
+  return request('PUT', '/settings/openrouter/enabled-models', { models });
+}
+
+/** Prefer browser → OpenRouter; fall back to backend proxy on CORS/network failure. */
+export async function fetchOpenRouterRemoteModels(): Promise<OpenRouterRemoteModel[]> {
+  const parse = (data: unknown): OpenRouterRemoteModel[] => {
+    const list = (data as { data?: OpenRouterRemoteModel[] })?.data;
+    return Array.isArray(list) ? list : [];
+  };
+  try {
+    const resp = await fetch('https://openrouter.ai/api/v1/models?output_modalities=text', {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    });
+    if (resp.ok) return parse(await resp.json());
+  } catch {
+    /* CORS / network — proxy below */
+  }
+  const proxied = await request<unknown>('GET', '/settings/openrouter/remote-models');
+  return parse(proxied);
 }
 
 // ===== Preferences =====

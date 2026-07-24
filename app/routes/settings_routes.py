@@ -344,16 +344,25 @@ async def api_get_api_keys(user=Depends(get_current_user)):
 
 @router.put("/api/settings/api-keys")
 async def api_update_api_keys(req: dict, user=Depends(get_current_user)):
-    from app.core.user_api_keys import save_user_api_keys, get_masked_keys, ALL_FIELDS
+    from app.core.user_api_keys import (
+        save_user_api_keys, save_credential_sources, get_masked_keys, ALL_FIELDS,
+    )
     from app.services.agent import clear_agent_cache
     from app.services.consumer_agent import clear_consumer_cache
 
     user_id = user["user_id"]
     filtered = {k: v for k, v in req.items() if k in ALL_FIELDS and isinstance(v, str)}
-    if not filtered:
+    sources_raw = req.get("credential_sources")
+    sources = sources_raw if isinstance(sources_raw, dict) else None
+    if not filtered and not sources:
         return {"success": False, "detail": "未提供有效的字段"}
 
-    save_user_api_keys(user_id, filtered)
+    if filtered:
+        save_user_api_keys(user_id, filtered)
+    if sources:
+        # values must be str "platform"|"user"
+        cleaned = {str(k): str(v) for k, v in sources.items()}
+        save_credential_sources(user_id, cleaned)
     clear_agent_cache(user_id)
     clear_consumer_cache(admin_id=user_id)
 
@@ -362,18 +371,19 @@ async def api_update_api_keys(req: dict, user=Depends(get_current_user)):
 
 @router.post("/api/settings/api-keys/test")
 async def api_test_api_keys(req: dict, user=Depends(get_current_user)):
-    """Test connectivity for a specific provider using the user's configured keys."""
+    """Test connectivity using the active credential source (platform vs user)."""
     import httpx as _httpx
-    from app.core.user_api_keys import get_user_api_keys
+    from app.core.api_config import get_provider_credentials, resolve_credential_source
+    from app.services.web_tools import _resolve_keys
 
     user_id = user["user_id"]
     provider = req.get("provider", "")
-    keys = get_user_api_keys(user_id)
     results = {}
 
     if provider in ("openai", "all"):
-        api_key = keys.get("openai_api_key", "") or os.getenv("OPENAI_API_KEY", "")
-        base_url = (keys.get("openai_base_url", "") or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
+        creds = get_provider_credentials("openai", user_id=user_id)
+        api_key = creds.get("api_key", "")
+        base_url = (creds.get("base_url") or "https://api.openai.com/v1").rstrip("/")
         if api_key:
             try:
                 async with _httpx.AsyncClient(timeout=10.0) as client:
@@ -385,11 +395,16 @@ async def api_test_api_keys(req: dict, user=Depends(get_current_user)):
             except Exception as e:
                 results["openai"] = {"ok": False, "error": str(e)[:200]}
         else:
-            results["openai"] = {"ok": False, "error": "未配置 API Key"}
+            src = resolve_credential_source("openai", user_id)
+            results["openai"] = {
+                "ok": False,
+                "error": "未配置我的 Key" if src == "user" else "未配置平台 Key",
+            }
 
     if provider in ("anthropic", "all"):
-        api_key = keys.get("anthropic_api_key", "") or os.getenv("ANTHROPIC_API_KEY", "")
-        base_url = (keys.get("anthropic_base_url", "") or os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")).rstrip("/")
+        creds = get_provider_credentials("anthropic", user_id=user_id)
+        api_key = creds.get("api_key", "")
+        base_url = (creds.get("base_url") or "https://api.anthropic.com").rstrip("/")
         if api_key:
             try:
                 async with _httpx.AsyncClient(timeout=10.0) as client:
@@ -401,10 +416,15 @@ async def api_test_api_keys(req: dict, user=Depends(get_current_user)):
             except Exception as e:
                 results["anthropic"] = {"ok": False, "error": str(e)[:200]}
         else:
-            results["anthropic"] = {"ok": False, "error": "未配置 API Key"}
+            src = resolve_credential_source("anthropic", user_id)
+            results["anthropic"] = {
+                "ok": False,
+                "error": "未配置我的 Key" if src == "user" else "未配置平台 Key",
+            }
 
     if provider in ("tavily", "all"):
-        api_key = keys.get("tavily_api_key", "") or os.getenv("TAVILY_API_KEY", "")
+        _cw, api_key = _resolve_keys(user_id)
+        # Prefer tavily for this button; fall back to cloudsway presence as ok-ish probe
         if api_key:
             try:
                 async with _httpx.AsyncClient(timeout=10.0) as client:
@@ -416,16 +436,19 @@ async def api_test_api_keys(req: dict, user=Depends(get_current_user)):
                 results["tavily"] = {"ok": resp.status_code == 200, "status": resp.status_code}
             except Exception as e:
                 results["tavily"] = {"ok": False, "error": str(e)[:200]}
+        elif _cw:
+            results["tavily"] = {"ok": True, "status": 0}  # platform/user has CloudsWay
         else:
-            results["tavily"] = {"ok": False, "error": "未配置 API Key"}
+            src = resolve_credential_source("tavily", user_id)
+            results["tavily"] = {
+                "ok": False,
+                "error": "未配置我的 Key" if src == "user" else "未配置平台 Key",
+            }
 
     if provider in ("kimi", "all"):
-        # Kimi（Moonshot）OpenAI-compat：用 GET /models 探活
-        api_key = keys.get("kimi_api_key", "") or os.getenv("KIMI_API_KEY", "") or os.getenv("MOONSHOT_API_KEY", "")
-        base_url = (keys.get("kimi_base_url", "")
-                    or os.getenv("KIMI_BASE_URL", "")
-                    or os.getenv("MOONSHOT_BASE_URL", "")
-                    or "https://api.moonshot.cn/v1").rstrip("/")
+        creds = get_provider_credentials("kimi", user_id=user_id)
+        api_key = creds.get("api_key", "")
+        base_url = (creds.get("base_url") or "https://api.moonshot.cn/v1").rstrip("/")
         if api_key:
             try:
                 async with _httpx.AsyncClient(timeout=10.0) as client:
@@ -437,11 +460,15 @@ async def api_test_api_keys(req: dict, user=Depends(get_current_user)):
             except Exception as e:
                 results["kimi"] = {"ok": False, "error": str(e)[:200]}
         else:
-            results["kimi"] = {"ok": False, "error": "未配置 API Key"}
+            src = resolve_credential_source("kimi", user_id)
+            results["kimi"] = {
+                "ok": False,
+                "error": "未配置我的 Key" if src == "user" else "未配置平台 Key",
+            }
 
     if provider in ("minimax", "all"):
-        # MiniMax 仅探 API Key 是否能用 OpenAI-compat models 端点；不要求 Group ID（仅 TTS/Video 才需要）。
-        api_key = keys.get("minimax_api_key", "") or os.getenv("MINIMAX_API_KEY", "")
+        creds = get_provider_credentials("minimax", user_id=user_id, capability="llm")
+        api_key = creds.get("api_key", "")
         if api_key:
             try:
                 async with _httpx.AsyncClient(timeout=10.0) as client:
@@ -453,12 +480,16 @@ async def api_test_api_keys(req: dict, user=Depends(get_current_user)):
             except Exception as e:
                 results["minimax"] = {"ok": False, "error": str(e)[:200]}
         else:
-            results["minimax"] = {"ok": False, "error": "未配置 API Key"}
+            src = resolve_credential_source("minimax", user_id)
+            results["minimax"] = {
+                "ok": False,
+                "error": "未配置我的 Key" if src == "user" else "未配置平台 Key",
+            }
 
     if provider in ("bedrock", "all"):
-        # Bedrock Bearer Token 探活：GET /foundation-models（控制平面端点，认 Bearer Token）
-        api_key = keys.get("bedrock_api_key", "") or os.getenv("BEDROCK_API_KEY", "")
-        region = keys.get("bedrock_region", "") or os.getenv("BEDROCK_REGION", "us-east-1")
+        creds = get_provider_credentials("bedrock", user_id=user_id)
+        api_key = creds.get("api_key", "")
+        region = creds.get("region") or "us-east-1"
         if api_key:
             try:
                 async with _httpx.AsyncClient(timeout=10.0) as client:
@@ -470,7 +501,32 @@ async def api_test_api_keys(req: dict, user=Depends(get_current_user)):
             except Exception as e:
                 results["bedrock"] = {"ok": False, "error": str(e)[:200]}
         else:
-            results["bedrock"] = {"ok": False, "error": "未配置 API Key"}
+            src = resolve_credential_source("bedrock", user_id)
+            results["bedrock"] = {
+                "ok": False,
+                "error": "未配置我的 Key" if src == "user" else "未配置平台 Key",
+            }
+
+    if provider in ("openrouter", "all"):
+        creds = get_provider_credentials("openrouter", user_id=user_id)
+        api_key = creds.get("api_key", "")
+        base_url = (creds.get("base_url") or "https://openrouter.ai/api/v1").rstrip("/")
+        if api_key:
+            try:
+                async with _httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get(
+                        f"{base_url}/models",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                    )
+                results["openrouter"] = {"ok": resp.status_code == 200, "status": resp.status_code}
+            except Exception as e:
+                results["openrouter"] = {"ok": False, "error": str(e)[:200]}
+        else:
+            src = resolve_credential_source("openrouter", user_id)
+            results["openrouter"] = {
+                "ok": False,
+                "error": "未配置我的 Key" if src == "user" else "未配置平台 Key",
+            }
 
     return {"results": results}
 
@@ -488,6 +544,7 @@ async def api_keys_status(user=Depends(get_current_user)):
         or has_provider("kimi", user_id=user_id)
         or minimax_llm_ok
         or has_provider("bedrock", user_id=user_id)
+        or has_provider("openrouter", user_id=user_id)
     )
     return {
         "has_llm": has_any_llm,
@@ -498,7 +555,69 @@ async def api_keys_status(user=Depends(get_current_user)):
         "has_minimax_llm": minimax_llm_ok,
         "has_minimax_full": has_provider("minimax", user_id=user_id),
         "has_bedrock": has_provider("bedrock", user_id=user_id),
+        "has_openrouter": has_provider("openrouter", user_id=user_id),
     }
+
+
+@router.get("/api/settings/openrouter/enabled-models")
+async def api_get_openrouter_enabled(user=Depends(get_current_user)):
+    """Admin OpenRouter whitelist (synthetic catalog entries)."""
+    from app.services.preferences import get_openrouter_enabled_models
+    return {"models": get_openrouter_enabled_models(user["user_id"])}
+
+
+@router.put("/api/settings/openrouter/enabled-models")
+async def api_put_openrouter_enabled(req: dict, user=Depends(get_current_user)):
+    """Replace OpenRouter whitelist.
+
+    Body: {"models": [{"id":"anthropic/claude-sonnet-4","name":"...","reasoning":true}, ...]}
+    """
+    from app.services.preferences import set_openrouter_enabled_models
+    from app.services.agent import clear_agent_cache
+    from app.services.consumer_agent import clear_consumer_cache
+
+    models = req.get("models") if isinstance(req, dict) else None
+    if not isinstance(models, list):
+        raise HTTPException(status_code=400, detail="models must be a list")
+    user_id = user["user_id"]
+    saved = set_openrouter_enabled_models(user_id, models)
+    clear_agent_cache(user_id)
+    clear_consumer_cache(admin_id=user_id)
+    return {"success": True, "models": saved}
+
+
+@router.get("/api/settings/openrouter/remote-models")
+async def api_proxy_openrouter_models(user=Depends(get_current_user)):
+    """Optional CORS fallback: proxy OpenRouter GET /models using active credentials.
+
+    Preferred path is frontend → openrouter.ai directly; this exists when browser
+    CORS blocks the public list endpoint.
+    """
+    import httpx as _httpx
+    from app.core.api_config import get_provider_credentials
+
+    creds = get_provider_credentials("openrouter", user_id=user["user_id"])
+    base_url = (creds.get("base_url") or "https://openrouter.ai/api/v1").rstrip("/")
+    headers = {}
+    if creds.get("api_key"):
+        headers["Authorization"] = f"Bearer {creds['api_key']}"
+    try:
+        async with _httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(
+                f"{base_url}/models",
+                params={"output_modalities": "text"},
+                headers=headers,
+            )
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"OpenRouter models HTTP {resp.status_code}: {resp.text[:300]}",
+            )
+        return resp.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e)[:300]) from e
 
 
 # ── User Preferences ─────────────────────────────────────────────

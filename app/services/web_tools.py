@@ -24,25 +24,18 @@ _TIMEOUT = 30.0
 
 
 def _resolve_keys(user_id: Optional[str] = None):
-    """Return (cloudsway_key, tavily_key) checking per-user config first."""
-    cw_key = ""
-    tv_key = ""
+    """Return (cloudsway_key, tavily_key) honoring credential source for ``tavily``."""
+    from app.core.api_config import resolve_credential_source
+    from app.core.user_api_keys import get_user_api_keys
 
-    if user_id:
+    source = resolve_credential_source("tavily", user_id)
+    if source == "user" and user_id:
         try:
-            from app.core.user_api_keys import get_user_api_keys
             ukeys = get_user_api_keys(user_id)
-            cw_key = ukeys.get("cloudsway_search_key", "")
-            tv_key = ukeys.get("tavily_api_key", "")
+            return ukeys.get("cloudsway_search_key", ""), ukeys.get("tavily_api_key", "")
         except Exception:
-            pass
-
-    if not cw_key:
-        cw_key = os.getenv("CLOUDSWAY_SEARCH_KEY", "")
-    if not tv_key:
-        tv_key = os.getenv("TAVILY_API_KEY", "")
-
-    return cw_key, tv_key
+            return "", ""
+    return os.getenv("CLOUDSWAY_SEARCH_KEY", ""), os.getenv("TAVILY_API_KEY", "")
 
 
 def _provider(cw_key: str, tv_key: str) -> str:

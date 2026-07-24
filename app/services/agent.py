@@ -236,6 +236,28 @@ def _resolve_model(model_id: str, user_id: Optional[str] = None):
             base_url="https://api.minimax.io/anthropic",
         ))
 
+    # OpenRouter（OpenAI-compat 聚合）。catalog id = openrouter:{author}/{slug}
+    # reasoning 白名单项通过 extra_body.reasoning.enabled 开启；流式 thinking 走
+    # chat.py 已有的 additional_kwargs.reasoning_content / reasoning 通道。
+    if model_id.startswith("openrouter:"):
+        from app.core.api_config import get_provider_credentials
+        from app.services.model_catalog import find_model
+        creds = get_provider_credentials("openrouter", user_id=user_id)
+        if not creds.get("api_key"):
+            raise RuntimeError("未配置 OpenRouter API Key（设置页 → OpenRouter）")
+        bare_model = model_id.split(":", 1)[1]
+        extra: Dict[str, Any] = {
+            "model": bare_model,
+            "model_provider": "openai",
+            "api_key": creds["api_key"],
+            "base_url": creds.get("base_url") or "https://openrouter.ai/api/v1",
+        }
+        meta = find_model(model_id, user_id=user_id) or {}
+        if meta.get("reasoning"):
+            # OpenRouter reasoning API: https://openrouter.ai/docs
+            extra["extra_body"] = {"reasoning": {"enabled": True}}
+        return _apply_empty_stream_guard(init_chat_model(**extra))
+
     # AWS Bedrock（Bearer Token + InvokeModel REST）。
     # 支持 Anthropic Claude 4.5+ 系列模型，使用 bedrock-runtime 端点。
     # 注意：thinking 变体（如 bedrock:claude-opus-4-7-thinking）必须先在

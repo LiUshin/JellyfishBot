@@ -1242,6 +1242,21 @@ _MEDIA_TAG_RE = re.compile(r"<<FILE:([^>]+?)>>")
 | `cron` | Cron 表达式 | `0 9 * * *` |
 | `interval` | 间隔（秒） | `3600` |
 
+`once` 且 `schedule` 为空（或 `"now"`）表示「创建后立即执行一次」—— 这是 `spawn_child_task` 的默认形态。`_compute_next_run` 仅在任务 `last_run_at` 为空时返回立即执行时间，跑过一次后返回 `None`，否则每轮重排都会落在过去、被堆立刻重新触发形成死循环。
+
+### 8.4.1 失控防护
+
+调度器**没有失败重试机制** —— `_execute_*_task` 无论 success / error / timeout 都走同一段收尾重排。为兜住调度 bug 导致的空转，`_apply_post_run_schedule()`（admin / service 共用）在**每次跑完重排时**施加两层保护：
+
+| 保护 | 环境变量 | 默认 | 行为 |
+|---|---|---|---|
+| 连续失败熔断 | `SCHEDULER_MAX_CONSECUTIVE_FAILURES` | 5 | `consecutive_failures` 达阈值 → `enabled=false` + `next_run_at=null`，并在该次 run 的 `steps[]` 记一条 `error` 说明；成功一次即清零 |
+| 最小执行间隔 | `SCHEDULER_MIN_RUN_INTERVAL_S` | 5 | 重排结果早于 `finished + N 秒` 时上抬到该时刻 |
+
+两者填 `0` 即关闭。均只作用于「跑完排下次」，不影响创建即执行。通过 API/UI 把 `enabled` 改回 `true` 会重置失败计数。
+
+回归脚本：`scripts/smoke_runaway_guards.py`。
+
 ### 8.5 时区处理
 
 - 每个任务存 `tz_offset_hours` 字段（创建时的用户时区偏移）

@@ -104,6 +104,31 @@ def get_catalog(user_id: Optional[str] = None) -> Dict[str, Any]:
     return out
 
 
+def _openrouter_catalog_entries(user_id: Optional[str]) -> List[Dict[str, Any]]:
+    """Build synthetic catalog rows from the Admin OpenRouter whitelist."""
+    if not user_id:
+        return []
+    try:
+        from app.services.preferences import get_openrouter_enabled_models
+        enabled = get_openrouter_enabled_models(user_id)
+    except Exception:
+        return []
+    rows: List[Dict[str, Any]] = []
+    for item in enabled:
+        slug = item.get("id") or ""
+        if not slug:
+            continue
+        rows.append({
+            "id": f"openrouter:{slug}",
+            "provider": "openrouter",
+            "display_name": item.get("name") or slug,
+            "tier": "thinking" if item.get("reasoning") else "high",
+            "reasoning": bool(item.get("reasoning")),
+            "openrouter_slug": slug,
+        })
+    return rows
+
+
 def list_models(
     capability: str,
     user_id: Optional[str] = None,
@@ -112,9 +137,16 @@ def list_models(
     """列出某 capability 下所有 model 条目。
 
     only_available=True 时按当前用户已配置凭据过滤（设置页选择器使用）。
+    LLM 额外合并 Admin 勾选的 OpenRouter 白名单模型。
     """
     catalog = get_catalog(user_id)
     items: List[Dict[str, Any]] = list(catalog.get(capability) or [])
+    if capability == "llm":
+        # Whitelist entries override same id if somehow present in static catalog.
+        by_id = {m.get("id"): m for m in items if m.get("id")}
+        for row in _openrouter_catalog_entries(user_id):
+            by_id[row["id"]] = row
+        items = list(by_id.values())
     if only_available:
         from app.core.api_config import has_provider_credentials
         items = [m for m in items if has_provider_credentials(
@@ -130,6 +162,10 @@ def find_model(model_id: str, user_id: Optional[str] = None) -> Optional[Dict[st
         for m in catalog.get(cap) or []:
             if m.get("id") == model_id:
                 return {**m, "capability": cap}
+    if model_id.startswith("openrouter:") and user_id:
+        for m in _openrouter_catalog_entries(user_id):
+            if m.get("id") == model_id:
+                return {**m, "capability": "llm"}
     return None
 
 

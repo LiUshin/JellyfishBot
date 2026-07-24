@@ -201,6 +201,20 @@ async def _stream_consumer(agent, agent_input, config, ctx, conv_id):
 
                 additional = getattr(msg, "additional_kwargs", {}) or {}
                 reasoning = additional.get("reasoning_content") or additional.get("reasoning", "")
+                if not (isinstance(reasoning, str) and reasoning):
+                    details = additional.get("reasoning_details")
+                    if isinstance(details, list):
+                        parts = []
+                        for d in details:
+                            if isinstance(d, dict):
+                                parts.append(
+                                    d.get("text") or d.get("summary") or d.get("content") or ""
+                                )
+                            elif isinstance(d, str):
+                                parts.append(d)
+                        reasoning = "".join(p for p in parts if p)
+                    elif isinstance(details, str):
+                        reasoning = details
                 if isinstance(reasoning, str) and reasoning:
                     _blk_append_thinking(reasoning)
                     yield f"data: {json.dumps({'type': 'thinking', 'content': reasoning}, ensure_ascii=False)}\n\n"

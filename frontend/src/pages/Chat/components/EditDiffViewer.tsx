@@ -5,12 +5,12 @@
  * ApprovalCard 内部判断），把 old_string + new_string 还原到原文件中的位置，
  * 显示完整带上下文 diff。
  *
- * 加载：异步 GET /api/files/read 拿原文件全文 → 在原文中 indexOf old_string →
- * 计算 unified diff（默认 3 行上下文）→ 渲染 hunk。
+ * 加载：异步 GET /api/files/read 拿原文件全文 → 在原文中定位 old_string（编辑
+ * 已落盘时则定位 new_string 反推）→ 计算 unified diff（默认 3 行上下文）→ 渲染 hunk。
  *
  * 边界：
- *   - 原文未找到 old_string（agent 写错或文件已被改）：降级到双段对照
- *     （直接显示 old_string 全部 - 与 new_string 全部 +），不报错阻断 UI
+ *   - old_string / new_string 都未找到（agent 写错或文件被第三方改过）：降级到
+ *     双段对照（直接显示 old_string 全部 - 与 new_string 全部 +），不报错阻断 UI
  *   - fetch 失败 / 路径不存在（新文件 edit）：同样降级到双段对照
  *   - 大文件 / 大量 hunk：默认显示 hunk 视图，按钮可切换「展开全文」
  */

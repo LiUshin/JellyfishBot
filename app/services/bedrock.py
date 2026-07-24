@@ -44,25 +44,69 @@ log = logging.getLogger(__name__)
 
 _BEDROCK_RUNTIME_BASE = "https://bedrock-runtime.{region}.amazonaws.com"
 
-# Model ID → Bedrock Inference Profile ID mapping
-# Newer models require the "us." geo-prefix for on-demand invocation.
+# Short name → foundation / profile id **without** geo prefix.
+# Geo prefix (us. / apac. / eu.) is applied from BEDROCK_REGION at call time.
 _INFERENCE_PROFILE_MAP: Dict[str, str] = {
-    "claude-opus-4-7": "us.anthropic.claude-opus-4-7",
-    "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1",
-    "claude-opus-4-5": "us.anthropic.claude-opus-4-5-20251101-v1:0",
-    "claude-opus-4-1": "us.anthropic.claude-opus-4-1-20250805-v1:0",
-    "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
-    "claude-sonnet-4-5": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "claude-opus-4-7": "anthropic.claude-opus-4-7",
+    "claude-opus-4-6": "anthropic.claude-opus-4-6-v1",
+    "claude-opus-4-5": "anthropic.claude-opus-4-5-20251101-v1:0",
+    "claude-opus-4-1": "anthropic.claude-opus-4-1-20250805-v1:0",
+    "claude-sonnet-4-6": "anthropic.claude-sonnet-4-6",
+    "claude-sonnet-4-5": "anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "claude-haiku-4-5": "anthropic.claude-haiku-4-5-20251001-v1:0",
 }
 
+# Known cross-region inference geo prefixes (strip then re-apply from region).
+_GEO_PREFIXES = ("us.", "eu.", "apac.", "jp.", "au.", "global.")
 
-def _to_bedrock_model_id(short_name: str) -> str:
-    """Map a short model name to the full Bedrock inference profile ID."""
+
+def geo_prefix_for_region(region: str) -> str:
+    """Map an AWS region to Bedrock cross-region inference geo prefix.
+
+    - North America (us-*, ca-*) → ``us``
+    - Asia Pacific (ap-*) → ``apac``
+    - Europe (eu-*, eusc-*) → ``eu``
+    Unknown regions default to ``us`` (legacy behavior) with a warning.
+    """
+    r = (region or "us-east-1").strip().lower()
+    if r.startswith(("us-", "us_", "ca-", "ca_")) or r in ("us", "ca"):
+        return "us"
+    if r.startswith(("ap-", "ap_", "apac")):
+        return "apac"
+    if r.startswith(("eu-", "eu_", "eusc-", "eusc_")) or r in ("eu",):
+        return "eu"
+    # sa-east-1 etc. commonly use US commercial profiles for Anthropic CRIS
+    if r.startswith(("sa-", "sa_")):
+        return "us"
+    log.warning(
+        "Unknown Bedrock region %r — defaulting inference geo prefix to 'us'",
+        region,
+    )
+    return "us"
+
+
+def _strip_geo_prefix(model_id: str) -> str:
+    for p in _GEO_PREFIXES:
+        if model_id.startswith(p):
+            return model_id[len(p):]
+    return model_id
+
+
+def _to_bedrock_model_id(short_name: str, region: str = "us-east-1") -> str:
+    """Map a short model name to a geo-prefixed Bedrock inference profile ID.
+
+    Prefix follows ``geo_prefix_for_region(region)`` so e.g. ``ap-southeast-1``
+    yields ``apac.anthropic.…`` while ``us-east-1`` yields ``us.anthropic.…``.
+    Full IDs that already include a geo prefix are rewritten to match *region*.
+    """
+    geo = geo_prefix_for_region(region)
     if short_name in _INFERENCE_PROFILE_MAP:
-        return _INFERENCE_PROFILE_MAP[short_name]
-    # If already a full ID (contains 'anthropic.'), pass through
+        bare = _strip_geo_prefix(_INFERENCE_PROFILE_MAP[short_name])
+        return f"{geo}.{bare}"
     if "anthropic." in short_name:
+        bare = _strip_geo_prefix(short_name)
+        if bare.startswith("anthropic."):
+            return f"{geo}.{bare}"
         return short_name
     return short_name
 
@@ -570,7 +614,7 @@ class ChatBedrockInvoke(BaseChatModel):
 
     def _build_url(self, *, stream: bool = False) -> str:
         base = _BEDROCK_RUNTIME_BASE.format(region=self.region)
-        model_id = _to_bedrock_model_id(self.model_name)
+        model_id = _to_bedrock_model_id(self.model_name, region=self.region)
         path = "invoke-with-response-stream" if stream else "invoke"
         return f"{base}/model/{model_id}/{path}"
 
